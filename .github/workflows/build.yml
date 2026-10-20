@@ -1,0 +1,40 @@
+name: Build Shofha IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate app icon
+        run: |
+          pip3 install --quiet pillow
+          python3 tools/generate_icon.py
+
+      - name: Build unsigned app
+        run: |
+          xcodebuild -project ShofhaApp.xcodeproj \
+            -scheme ShofhaApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/ShofhaApp.app Payload/
+          zip -qry Shofha.ipa Payload
+          ls -lh Shofha.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shofha-IPA
+          path: Shofha.ipa
