@@ -1,0 +1,220 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A11CE0000000000000000021 /* ShofhaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11CE0000000000000000012 /* ShofhaApp.swift */; };
+		A11CE0000000000000000022 /* WebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11CE0000000000000000013 /* WebView.swift */; };
+		A11CE0000000000000000023 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A11CE0000000000000000015 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A11CE0000000000000000011 /* ShofhaApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShofhaApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A11CE0000000000000000012 /* ShofhaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShofhaApp.swift; sourceTree = "<group>"; };
+		A11CE0000000000000000013 /* WebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebView.swift; sourceTree = "<group>"; };
+		A11CE0000000000000000014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A11CE0000000000000000015 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A11CE0000000000000000042 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A11CE0000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				A11CE0000000000000000004 /* ShofhaApp */,
+				A11CE0000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A11CE0000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A11CE0000000000000000011 /* ShofhaApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A11CE0000000000000000004 /* ShofhaApp */ = {
+			isa = PBXGroup;
+			children = (
+				A11CE0000000000000000012 /* ShofhaApp.swift */,
+				A11CE0000000000000000013 /* WebView.swift */,
+				A11CE0000000000000000015 /* Assets.xcassets */,
+				A11CE0000000000000000014 /* Info.plist */,
+			);
+			path = ShofhaApp;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A11CE0000000000000000031 /* ShofhaApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A11CE0000000000000000052 /* Build configuration list for PBXNativeTarget "ShofhaApp" */;
+			buildPhases = (
+				A11CE0000000000000000041 /* Sources */,
+				A11CE0000000000000000042 /* Frameworks */,
+				A11CE0000000000000000043 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ShofhaApp;
+			productName = ShofhaApp;
+			productReference = A11CE0000000000000000011 /* ShofhaApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A11CE0000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					A11CE0000000000000000031 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = A11CE0000000000000000051 /* Build configuration list for PBXProject "ShofhaApp" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A11CE0000000000000000002;
+			productRefGroup = A11CE0000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A11CE0000000000000000031 /* ShofhaApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A11CE0000000000000000043 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11CE0000000000000000023 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A11CE0000000000000000041 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11CE0000000000000000021 /* ShofhaApp.swift in Sources */,
+				A11CE0000000000000000022 /* WebView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A11CE0000000000000000061 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+			};
+			name = Debug;
+		};
+		A11CE0000000000000000062 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+			};
+			name = Release;
+		};
+		A11CE0000000000000000063 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShofhaApp/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.etoo.shofha;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A11CE0000000000000000064 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShofhaApp/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.etoo.shofha;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A11CE0000000000000000051 /* Build configuration list for PBXProject "ShofhaApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A11CE0000000000000000061 /* Debug */,
+				A11CE0000000000000000062 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A11CE0000000000000000052 /* Build configuration list for PBXNativeTarget "ShofhaApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A11CE0000000000000000063 /* Debug */,
+				A11CE0000000000000000064 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A11CE0000000000000000001 /* Project object */;
+}
