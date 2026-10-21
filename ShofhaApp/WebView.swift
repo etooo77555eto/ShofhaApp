@@ -62,11 +62,60 @@ struct ContentView: View {
     }
 }
 
+// Ad / pop-up networks used by the video hosts' players. Anything served
+// from these domains is blocked before it loads, and any navigation to
+// them is cancelled.
+enum AdBlocker {
+    static let domains: [String] = [
+        "popads.net", "popcash.net", "poponclick.com", "onclickads.net",
+        "onclickperformance.com", "onadclick.com",
+        "exosrv.com", "exdynsrv.com", "exoclick.com",
+        "adcash.com", "propellerads.com", "hilltopads.com",
+        "trafficjunky.com", "juicyads.com", "a-ads.com", "bidvertiser.com",
+        "mgid.com", "adskeeper.com", "tsyndicate.com",
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+        "amazon-adsystem.com", "adsterra.com", "highperformanceformat.com",
+        "profitablecpmrate.com", "effectivecpmcontent.com",
+        "clickadu.com", "monetag.com", "evadav.com", "galaksion.com",
+        "rollerads.com", "zeydoo.com"
+    ]
+
+    static func isAdHost(_ host: String?) -> Bool {
+        guard let h = host?.lowercased() else { return false }
+        return domains.contains { h == $0 || h.hasSuffix("." + $0) }
+    }
+
+    // Safari-style content rule list JSON: block every request whose
+    // domain is one of the ad networks above.
+    static func ruleListJSON() -> String {
+        let rules: [[String: Any]] = [[
+            "trigger": ["url-filter": ".*",
+                        "if-domain": domains.map { "*" + $0 }],
+            "action": ["type": "block"]
+        ]]
+        if let data = try? JSONSerialization.data(withJSONObject: rules),
+           let json = String(data: data, encoding: .utf8) {
+            return json
+        }
+        return "[]"
+    }
+
+    // Inside embedded players only: window.open is the ad pop-up door.
+    // The main page keeps window.open (the site itself uses it).
+    static let popupKillerJS = """
+    (function() {
+      if (window === window.top) { return; }
+      try { window.open = function() { return null; }; } catch (e) {}
+    })();
+    """
+}
+
 struct WebView: UIViewRepresentable {
     @Binding var isLoading: Bool
     @Binding var loadError: String?
 
     static let homeURL = URL(string: "https://shofha.vercel.app")!
+    static let homeHost = "shofha.vercel.app"
     static let sharedProcessPool = WKProcessPool()
 
     func makeCoordinator() -> Coordinator {
@@ -78,11 +127,17 @@ struct WebView: UIViewRepresentable {
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsPictureInPictureMediaPlayback = true
-        config.preferences.javaScriptCanOpenWindowsAutomatically = true
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
         // Persistent store: cookies, cache and site data survive between launches,
         // so repeat opens skip re-downloading what is already on the phone.
         config.websiteDataStore = WKWebsiteDataStore.default()
         config.processPool = WebView.sharedProcessPool
+
+        // Kill pop-up calls inside embedded players from the very start.
+        let script = WKUserScript(source: AdBlocker.popupKillerJS,
+                                  injectionTime: .atDocumentStart,
+                                  forMainFrameOnly: false)
+        config.userContentController.addUserScript(script)
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -92,7 +147,22 @@ struct WebView: UIViewRepresentable {
         webView.scrollView.backgroundColor = UIColor(red: 0.043, green: 0.043, blue: 0.078, alpha: 1)
         webView.isOpaque = false
         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-        webView.load(URLRequest(url: WebView.homeURL))
+
+        // Compile the ad-block rule list, attach it, then load the site.
+        // If compilation ever fails the site still loads, just unfiltered.
+        if let store = WKContentRuleListStore.default() {
+            store.compileContentRuleList(forIdentifier: "shofha-adblock",
+                                         encodedContentRuleList: AdBlocker.ruleListJSON()) { list, _ in
+                DispatchQueue.main.async {
+                    if let list = list {
+                        config.userContentController.add(list)
+                    }
+                    webView.load(URLRequest(url: WebView.homeURL))
+                }
+            }
+        } else {
+            webView.load(URLRequest(url: WebView.homeURL))
+        }
         return webView
     }
 
@@ -100,6 +170,12 @@ struct WebView: UIViewRepresentable {
 
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var parent: WebView
+        // Foreign hosts the user deliberately opened from the site itself
+        // (e.g. a download-server page): their in-flow taps stay allowed.
+        var approvedHosts = Set<String>()
+        // Short window after opening such a page, so its redirect chain
+        // can finish without being mistaken for an ad hijack.
+        var approvedUntil = Date.distantPast
 
         init(parent: WebView) {
             self.parent = parent
@@ -120,11 +196,12 @@ struct WebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            // Cancelled navigations (blocked ads) also land here — stay silent.
+            if (error as NSError).code == NSURLErrorCancelled { return }
             parent.isLoading = false
             parent.loadError = "تأكد من الإنترنت وحاول مرة ثانية"
         }
 
-        // External schemes (Telegram, WhatsApp, tel, mailto...) open in their apps
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let url = navigationAction.request.url,
@@ -132,27 +209,63 @@ struct WebView: UIViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
-            if scheme == "http" || scheme == "https" || scheme == "about" || scheme == "data" {
-                decisionHandler(.allow)
-            } else {
+            // External schemes (Telegram, WhatsApp, tel, mailto...) open in their apps
+            guard scheme == "http" || scheme == "https" || scheme == "about" || scheme == "data" else {
                 if UIApplication.shared.canOpenURL(url) {
                     UIApplication.shared.open(url)
                 }
                 decisionHandler(.cancel)
+                return
             }
+            let host = url.host?.lowercased()
+            // Nothing from an ad network may navigate anywhere, in any frame.
+            if AdBlocker.isAdHost(host) {
+                decisionHandler(.cancel)
+                return
+            }
+            // New-window requests are decided by createWebViewWith below.
+            guard let target = navigationAction.targetFrame else {
+                decisionHandler(.allow)
+                return
+            }
+            if target.isMainFrame, let h = host, h != WebView.homeHost {
+                // The top page may only leave the site through a flow the
+                // user opened himself (download page) — anything else is a
+                // player trying to hijack the screen with an ad page.
+                let currentHost = webView.url?.host?.lowercased()
+                let inApprovedFlow = approvedHosts.contains(h)
+                    || Date() < approvedUntil
+                    || (currentHost != nil && currentHost != WebView.homeHost)
+                decisionHandler(inApprovedFlow ? .allow : .cancel)
+                return
+            }
+            decisionHandler(.allow)
         }
 
-        // target="_blank" links load inside the same web view instead of dying
+        // Pop-up windows: the video players fire their ads through these.
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            if let url = navigationAction.request.url {
-                if let scheme = url.scheme?.lowercased(), scheme != "http" && scheme != "https" {
-                    if UIApplication.shared.canOpenURL(url) {
-                        UIApplication.shared.open(url)
-                    }
-                } else {
-                    webView.load(navigationAction.request)
+            guard let url = navigationAction.request.url else { return nil }
+            if let scheme = url.scheme?.lowercased(), scheme != "http" && scheme != "https" {
+                if UIApplication.shared.canOpenURL(url) {
+                    UIApplication.shared.open(url)
                 }
+                return nil
+            }
+            let host = url.host?.lowercased()
+            if AdBlocker.isAdHost(host) { return nil }
+            // Only pop-ups the site's own page asked for (download / social
+            // buttons) are honoured; player iframes' pop-ups die silently.
+            if navigationAction.sourceFrame.isMainFrame {
+                if let h = host, h == "t.me" || h == "telegram.me" || h.hasSuffix(".t.me") {
+                    UIApplication.shared.open(url)
+                    return nil
+                }
+                if let h = host {
+                    approvedHosts.insert(h)
+                    approvedUntil = Date().addingTimeInterval(30)
+                }
+                webView.load(navigationAction.request)
             }
             return nil
         }
