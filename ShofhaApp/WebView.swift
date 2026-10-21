@@ -686,7 +686,7 @@ struct CollectionView: View {
     var body: some View {
         ScrollView {
             if cards.isEmpty {
-                ProgressView().tint(.white).padding(.top, 60)
+                ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white)).padding(.top, 60)
             } else {
                 GridView(cards: cards)
             }
@@ -717,7 +717,7 @@ struct GenreView: View {
                 GridView(cards: store.cards(ofGenre: genre))
             } else {
                 VStack(spacing: 12) {
-                    ProgressView().tint(.white)
+                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
                     Text("جاري تحميل الكتالوج...").font(.footnote).foregroundColor(.gray)
                 }
                 .padding(.top, 60)
@@ -852,7 +852,7 @@ struct DetailView: View {
                     }
                     watchSection(det)
                 } else {
-                    ProgressView().tint(.white)
+                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
                         .frame(maxWidth: .infinity).padding(.top, 30)
                 }
             }
