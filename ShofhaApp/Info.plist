@@ -10,6 +10,11 @@
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleShortVersionString</key>
