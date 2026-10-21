@@ -75,6 +75,97 @@ func normText(_ s: String) -> String {
     return t
 }
 
+// MARK: - Models
+
+struct Card: Identifiable, Hashable {
+    let i: Int
+    var t: String
+    var l: String
+    var p: String
+    var y: Int?
+    var g: [String]
+    var r: Double?
+    var k: String          // film | series | anime
+    var e: Int?
+    var sc: Int?
+    var d: String?
+    var dub: Bool
+    var q: String
+
+    var id: Int { i }
+    var isSeriesLike: Bool { k == "series" || k == "anime" }
+    var kindName: String {
+        switch k {
+        case "film": return "فيلم"
+        case "anime": return "أنمي"
+        default: return "مسلسل"
+        }
+    }
+}
+
+extension Card: Decodable {
+    enum CodingKeys: String, CodingKey { case i, t, l, p, y, g, r, k, e, sc, d, dub, q }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        i = try c.decodeIfPresent(Int.self, forKey: .i) ?? 0
+        t = try c.decodeIfPresent(String.self, forKey: .t) ?? ""
+        l = try c.decodeIfPresent(String.self, forKey: .l) ?? ""
+        p = try c.decodeIfPresent(String.self, forKey: .p) ?? ""
+        y = try c.decodeIfPresent(Int.self, forKey: .y)
+        g = try c.decodeIfPresent([String].self, forKey: .g) ?? []
+        r = try c.decodeIfPresent(Double.self, forKey: .r)
+        k = try c.decodeIfPresent(String.self, forKey: .k) ?? "film"
+        e = try c.decodeIfPresent(Int.self, forKey: .e)
+        sc = try c.decodeIfPresent(Int.self, forKey: .sc)
+        d = try c.decodeIfPresent(String.self, forKey: .d)
+        dub = try c.decodeIfPresent(Bool.self, forKey: .dub) ?? false
+        q = try c.decodeIfPresent(String.self, forKey: .q) ?? ""
+    }
+}
+
+struct Server: Decodable, Hashable {
+    var label: String
+    var url: String
+}
+
+struct Episode: Decodable, Identifiable {
+    var n: Int
+    var servers: [Server]
+    var defaultURL: String?
+    var date: String?
+    var id: Int { n }
+    enum CodingKeys: String, CodingKey { case n, servers, date; case defaultURL = "default" }
+}
+
+struct Detail {
+    var story: String
+    var servers: [Server]
+    var defaultURL: String?
+    var dur: Int?
+    var country: String
+    var seasons: [String: [Episode]]
+    var seasonNumbers: [Int] { seasons.keys.compactMap { Int($0) }.sorted() }
+}
+
+extension Detail: Decodable {
+    enum CodingKeys: String, CodingKey { case story, servers, dur, country, seasons; case defaultURL = "default" }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        story = try c.decodeIfPresent(String.self, forKey: .story) ?? ""
+        servers = try c.decodeIfPresent([Server].self, forKey: .servers) ?? []
+        defaultURL = try c.decodeIfPresent(String.self, forKey: .defaultURL)
+        var parsedDur: Int? = nil
+        if let dv = try? c.decodeIfPresent(Int.self, forKey: .dur), let v = dv {
+            parsedDur = v
+        } else if let ds = try? c.decodeIfPresent(String.self, forKey: .dur), let sv = ds {
+            parsedDur = Int(sv)
+        }
+        dur = parsedDur
+        country = try c.decodeIfPresent(String.self, forKey: .country) ?? ""
+        seasons = try c.decodeIfPresent([String: [Episode]].self, forKey: .seasons) ?? [:]
+    }
+}
+
 
 struct ContentView: View {
     var body: some View {
