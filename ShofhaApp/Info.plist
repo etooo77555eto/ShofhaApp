@@ -6,6 +6,10 @@
 	<string>شوفها</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleShortVersionString</key>
