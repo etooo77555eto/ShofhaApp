@@ -137,6 +137,36 @@ struct Episode: Decodable, Identifiable {
     enum CodingKeys: String, CodingKey { case n, servers, date; case defaultURL = "default" }
 }
 
+struct CollectionInfo: Decodable, Identifiable {
+    var id: String
+    var name: String
+    var brand: String?
+    var sub: String?
+    var bg: String?
+    var fg: String?
+    var count: Int?
+    var posters: [String]?
+    var colors: [Color] { hexColors(from: bg ?? "") }
+    var titleColor: Color { fg.map { Color(hex: $0) } ?? .white }
+}
+
+struct HomeData: Decodable {
+    var hero: [Card]
+    var trend: [Card]
+    var films: [Card]
+    var series: [Card]
+    var anime: [Card]
+    var genres: [String]
+    var cols: [CollectionInfo]
+    var turk: [Card]
+}
+
+struct Manifest: Decodable {
+    var indexParts: [String]
+    var buckets: Int
+    var total: Int
+}
+
 
 struct ContentView: View {
     var body: some View {
