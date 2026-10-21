@@ -369,7 +369,7 @@ enum ImageLoader {
     private static var session: URLSession = {
         let cfg = URLSessionConfiguration.default
         cfg.urlCache = URLCache.shared
-        cfg.timeoutIntervalForRequest = 25
+        cfg.timeoutIntervalForRequest = 45
         cfg.httpAdditionalHeaders = [
             "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
             "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
@@ -381,9 +381,11 @@ enum ImageLoader {
         guard let url = safeURL(urlString) else { return nil }
         let key = url.absoluteString as NSString
         if let hit = memory.object(forKey: key) { return hit }
-        for attempt in 0..<2 {
-            if attempt > 0 {
+        for attempt in 0..<3 {
+            if attempt == 1 {
                 try? await Task.sleep(nanoseconds: 1_200_000_000)
+            } else if attempt == 2 {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
             }
             var req = URLRequest(url: url)
             if let host = url.host {
@@ -401,6 +403,11 @@ enum ImageLoader {
             }
         }
         return nil
+    }
+
+    static func cached(_ urlString: String) -> UIImage? {
+        guard let url = safeURL(urlString) else { return nil }
+        return memory.object(forKey: url.absoluteString as NSString)
     }
 
     private static func downsampled(_ data: Data) -> UIImage? {
@@ -425,6 +432,7 @@ struct PosterImage: View {
     let url: String
     @State private var image: UIImage?
     @State private var failed = false
+    @State private var loading = false
 
     var body: some View {
         ZStack {
@@ -447,15 +455,19 @@ struct PosterImage: View {
         }
         .clipped()
         .task(id: url) { await load() }
+        .onAppear { Task { await load() } }
     }
 
     private func load() async {
-        if image != nil { return }
-        if let cached = ImageLoader.memory.object(forKey: url as NSString) {
-            image = cached
+        if image != nil || loading { return }
+        if let hit = ImageLoader.cached(url) {
+            image = hit
             return
         }
+        loading = true
+        failed = false
         let img = await ImageLoader.load(url)
+        loading = false
         if let img = img {
             withAnimation(.easeIn(duration: 0.25)) { image = img }
         } else {
@@ -507,7 +519,7 @@ struct CardCell: View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topLeading) {
                 PosterImage(url: card.p)
-                    .aspectRatio(2/3, contentMode: .fill)
+                    .aspectRatio(2/3, contentMode: .fit)
                     .frame(maxWidth: .infinity)
                     .cornerRadius(13)
                     .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.09), lineWidth: 1))
@@ -1257,34 +1269,6 @@ struct DetailView: View {
                 .buttonStyle(PressScaleStyle())
                 .padding(.horizontal, 16)
             }
-            SectionHeader(title: "السيرفرات")
-            ForEach(servers.indices, id: \.self) { si in
-                let srv = servers[si]
-                NavigationLink(destination: PlayerView(title: title, servers: servers, initialURL: srv.url)) {
-                    HStack(spacing: 11) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10).fill(Color.brandGradient)
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 11, weight: .black)).foregroundColor(.white)
-                        }
-                        .frame(width: 34, height: 34)
-                        Text(srv.label).font(.system(size: 14.5, weight: .bold)).foregroundColor(.white)
-                        Spacer()
-                        if srv.url == defaultURL {
-                            Text("افتراضي")
-                                .font(.system(size: 10, weight: .bold)).foregroundColor(Color.brandGold)
-                                .padding(.horizontal, 8).padding(.vertical, 3.5)
-                                .background(Color.brandGold.opacity(0.14)).cornerRadius(8)
-                        }
-                        Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold)).foregroundColor(.gray)
-                    }
-                    .padding(13)
-                    .background(Color.white.opacity(0.05)).cornerRadius(14)
-                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
-                }
-                .buttonStyle(PressScaleStyle())
-                .padding(.horizontal, 16)
-            }
         }
     }
 }
@@ -1294,19 +1278,77 @@ struct DetailView: View {
 struct PlayerView: View {
     let title: String
     let servers: [Server]
-    @State private var currentURL: String
+    @State private var idx: Int
+    @State private var phase = 0
+    @State private var switched = false
 
     init(title: String, servers: [Server], initialURL: String) {
         self.title = title
         self.servers = servers
-        _currentURL = State(initialValue: cleanURL(initialURL))
+        var start = 0
+        for i in servers.indices {
+            if cleanURL(servers[i].url) == cleanURL(initialURL) {
+                start = i
+                break
+            }
+        }
+        _idx = State(initialValue: start)
+    }
+
+    private var currentURL: String {
+        if servers.isEmpty { return "" }
+        return cleanURL(servers[idx].url)
+    }
+
+    private func advance() {
+        if idx + 1 < servers.count {
+            switched = true
+            phase = 0
+            idx += 1
+        } else {
+            phase = 2
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
                 Color.black
-                PlayerWebView(url: currentURL)
+                if !servers.isEmpty && phase != 2 {
+                    PlayerWebView(url: currentURL,
+                                  onSuccess: { phase = 1 },
+                                  onFailure: { advance() })
+                        .id(currentURL)
+                }
+                if phase == 0 {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(1.3)
+                        Text(switched ? "السيرفر ما اشتغل — أبدّل لغيره…" : "جاري تجهيز الفيديو…")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.85))
+                    }
+                }
+                if phase == 2 {
+                    VStack(spacing: 11) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(Color.brandGold).font(.system(size: 26))
+                        Text("ما اشتغل أي سيرفر لهذا العنوان")
+                            .font(.system(size: 15, weight: .bold)).foregroundColor(.white)
+                        Text("تأكد من اتصالك وجرّب مرة ثانية")
+                            .font(.system(size: 12.5)).foregroundColor(.gray)
+                        Button(action: { idx = 0; switched = false; phase = 0 }) {
+                            Text("حاول مجدداً")
+                                .font(.system(size: 14, weight: .black)).foregroundColor(.white)
+                                .padding(.horizontal, 22).padding(.vertical, 10)
+                                .background(Color.brandGradient).cornerRadius(12)
+                        }
+                        .buttonStyle(PressScaleStyle())
+                        .padding(.top, 4)
+                    }
+                    .padding(16)
+                }
             }
             .aspectRatio(16/9, contentMode: .fit)
             .cornerRadius(14)
@@ -1314,39 +1356,16 @@ struct PlayerView: View {
             .padding(.horizontal, 12)
             .padding(.top, 10)
 
-            if servers.count > 1 {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(servers.indices, id: \.self) { si in
-                            let srv = servers[si]
-                            Button(action: { currentURL = cleanURL(srv.url) }) {
-                                Text(srv.label)
-                                    .font(.system(size: 12.5, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 15).padding(.vertical, 9)
-                                    .background(cleanURL(srv.url) == currentURL ? AnyShapeStyle(Color.brandGradient) : AnyShapeStyle(Color.white.opacity(0.06)))
-                                    .cornerRadius(17)
-                                    .overlay(RoundedRectangle(cornerRadius: 17).stroke(Color.white.opacity(cleanURL(srv.url) == currentURL ? 0 : 0.1), lineWidth: 1))
-                                    .shadow(color: cleanURL(srv.url) == currentURL ? Color.brandPurple.opacity(0.4) : .clear, radius: 8, y: 3)
-                            }
-                            .buttonStyle(PressScaleStyle())
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                }
-                .padding(.vertical, 13)
-            }
-
             HStack(spacing: 8) {
                 Image(systemName: "lightbulb.fill").foregroundColor(Color.brandGold).font(.system(size: 13))
-                Text("إذا توقف السيرفر بدّل لغيره من الأزرار فوق، وللصورة داخل صورة (PiP) كبّر الفيديو من زر ملء الشاشة داخل المشغّل.")
+                Text("التطبيق يبدّل تلقائياً بين السيرفرات إذا توقف واحد، وللصورة داخل صورة (PiP) كبّر الفيديو من زر ملء الشاشة داخل المشغّل.")
                     .font(.system(size: 12)).foregroundColor(.white.opacity(0.7))
                     .multilineTextAlignment(.leading)
             }
             .padding(13)
             .background(Color.white.opacity(0.04)).cornerRadius(13)
             .padding(.horizontal, 16)
-            .padding(.top, 4)
+            .padding(.top, 12)
             Spacer()
         }
         .background(AmbienceBackground())
@@ -1357,6 +1376,8 @@ struct PlayerView: View {
 
 struct PlayerWebView: UIViewRepresentable {
     let url: String
+    var onSuccess: () -> Void = {}
+    var onFailure: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1383,29 +1404,113 @@ struct PlayerWebView: UIViewRepresentable {
         webView.scrollView.backgroundColor = .black
         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
         context.coordinator.loadedURL = url
+        context.coordinator.onSuccess = onSuccess
+        context.coordinator.onFailure = onFailure
         if let store = WKContentRuleListStore.default() {
             store.compileContentRuleList(forIdentifier: "shofha-adblock",
                                          encodedContentRuleList: AdBlocker.ruleListJSON()) { list, _ in
                 DispatchQueue.main.async {
                     if let list = list { config.userContentController.add(list) }
-                    if let u = URL(string: url) { webView.load(URLRequest(url: u)) }
+                    if let u = URL(string: url) {
+                        context.coordinator.beginLoad()
+                        webView.load(URLRequest(url: u))
+                    }
                 }
             }
         } else if let u = URL(string: url) {
+            context.coordinator.beginLoad()
             webView.load(URLRequest(url: u))
         }
         return webView
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.onSuccess = onSuccess
+        context.coordinator.onFailure = onFailure
         if context.coordinator.loadedURL != url {
             context.coordinator.loadedURL = url
-            if let u = URL(string: url) { uiView.load(URLRequest(url: u)) }
+            if let u = URL(string: url) {
+                context.coordinator.beginLoad()
+                uiView.load(URLRequest(url: u))
+            }
         }
     }
 
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var loadedURL: String = ""
+        var onSuccess: () -> Void = {}
+        var onFailure: () -> Void = {}
+        private var generation = 0
+        private var resolved = false
+        private var watchdog: DispatchWorkItem?
+        private var probeItem: DispatchWorkItem?
+
+        static let probeJS = "(function() { var t = ''; try { t = (document.body ? document.body.innerText : '').toLowerCase(); } catch (e) {} var dead = ['file not found', 'video not found', 'file was deleted', 'this video has been deleted', 'video has been removed', 'no longer available', 'الفيديو غير متوفر', 'تم حذف هذا']; for (var i = 0; i < dead.length; i++) { if (t.indexOf(dead[i]) >= 0) { return 'dead'; } } if (document.querySelector('video')) { return 'video'; } if (document.querySelector('iframe')) { return 'frame'; } return 'empty'; })()"
+
+        func beginLoad() {
+            generation += 1
+            resolved = false
+            watchdog?.cancel()
+            probeItem?.cancel()
+            let gen = generation
+            let item = DispatchWorkItem { [weak self] in
+                guard let self = self, self.generation == gen, !self.resolved else { return }
+                self.fail()
+            }
+            watchdog = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: item)
+        }
+
+        private func succeed() {
+            if resolved { return }
+            resolved = true
+            watchdog?.cancel()
+            probeItem?.cancel()
+            onSuccess()
+        }
+
+        private func fail() {
+            if resolved { return }
+            resolved = true
+            watchdog?.cancel()
+            probeItem?.cancel()
+            onFailure()
+        }
+
+        private func scheduleProbe(_ webView: WKWebView, gen: Int, delay: Double, second: Bool) {
+            probeItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self = self, self.generation == gen, !self.resolved else { return }
+                webView.evaluateJavaScript(Coordinator.probeJS) { [weak self] result, _ in
+                    guard let self = self, self.generation == gen, !self.resolved else { return }
+                    let r = (result as? String) ?? "empty"
+                    if r == "dead" {
+                        self.fail()
+                    } else if r == "video" {
+                        self.succeed()
+                    } else if second {
+                        if r == "frame" { self.succeed() } else { self.fail() }
+                    } else {
+                        self.scheduleProbe(webView, gen: gen, delay: 6, second: true)
+                    }
+                }
+            }
+            probeItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            if resolved { return }
+            scheduleProbe(webView, gen: generation, delay: 4, second: false)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            fail()
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            fail()
+        }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
