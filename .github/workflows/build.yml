@@ -13,7 +13,7 @@ jobs:
 
       - name: Generate app icon
         run: |
-pip3 install --quiet --break-system-packages pillow
+          pip3 install --quiet --break-system-packages pillow
           python3 tools/generate_icon.py
 
       - name: Build unsigned app
