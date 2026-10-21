@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import ImageIO
 
 // MARK: - Theme
 
@@ -18,13 +19,20 @@ extension Color {
         }
     }
 
-    static let brandBg = Color(red: 0.043, green: 0.043, blue: 0.078)
-    static let brandCard = Color(red: 0.09, green: 0.09, blue: 0.14)
-    static let brandPurple = Color(red: 0.486, green: 0.361, blue: 1.0)
-    static let brandCyan = Color(red: 0.0, green: 0.761, blue: 1.0)
+    static let brandBg = Color(red: 0.039, green: 0.039, blue: 0.075)
+    static let brandBg2 = Color(red: 0.07, green: 0.06, blue: 0.13)
+    static let brandCard = Color(red: 0.085, green: 0.085, blue: 0.135)
+    static let brandPurple = Color(red: 0.545, green: 0.361, blue: 0.965)
+    static let brandViolet = Color(red: 0.486, green: 0.227, blue: 0.929)
+    static let brandCyan = Color(red: 0.133, green: 0.827, blue: 0.933)
+    static let brandGold = Color(red: 0.98, green: 0.75, blue: 0.14)
     static var brandGradient: LinearGradient {
         LinearGradient(colors: [brandPurple, brandCyan],
                        startPoint: .leading, endPoint: .trailing)
+    }
+    static var brandGradientV: LinearGradient {
+        LinearGradient(colors: [brandViolet, brandPurple, brandCyan],
+                       startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 }
 
@@ -204,7 +212,6 @@ struct Manifest: Decodable {
     var total: Int
 }
 
-
 // Season numbers of a detail, ascending. (Kept out of the Detail type:
 // the one-liner computed property version broke the compiler.)
 func seasonNumbers(of det: Detail) -> [Int] {
@@ -349,67 +356,184 @@ final class AppStore: ObservableObject {
     }
 }
 
-// MARK: - Shared views
+// MARK: - Image pipeline
+//
+// The source hosts refuse or stall plain URLSession image loads (that's why
+// posters stayed blank), so posters are fetched with a real browser
+// identity, a same-host referer, one retry, an in-memory cache on top of the
+// app-wide 300 MB URLCache, and downsampling to keep scrolling smooth.
 
-struct PosterView: View {
+enum ImageLoader {
+    static let memory = NSCache<NSString, UIImage>()
+
+    private static var session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.urlCache = URLCache.shared
+        cfg.timeoutIntervalForRequest = 25
+        cfg.httpAdditionalHeaders = [
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"
+        ]
+        return URLSession(configuration: cfg)
+    }()
+
+    static func load(_ urlString: String) async -> UIImage? {
+        guard let url = safeURL(urlString) else { return nil }
+        let key = url.absoluteString as NSString
+        if let hit = memory.object(forKey: key) { return hit }
+        for attempt in 0..<2 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+            }
+            var req = URLRequest(url: url)
+            if let host = url.host {
+                req.setValue("https://\(host)/", forHTTPHeaderField: "Referer")
+            }
+            do {
+                let (data, resp) = try await session.data(for: req)
+                if let http = resp as? HTTPURLResponse, http.statusCode != 200 { continue }
+                if let img = downsampled(data) {
+                    memory.setObject(img, forKey: key)
+                    return img
+                }
+            } catch {
+                continue
+            }
+        }
+        return nil
+    }
+
+    private static func downsampled(_ data: Data) -> UIImage? {
+        let opts: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let src = CGImageSourceCreateWithData(data as CFData, opts as CFDictionary) else {
+            return UIImage(data: data)
+        }
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 540
+        ]
+        if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) {
+            return UIImage(cgImage: cg)
+        }
+        return UIImage(data: data)
+    }
+}
+
+struct PosterImage: View {
     let url: String
+    @State private var image: UIImage?
+    @State private var failed = false
+
     var body: some View {
         ZStack {
-            Color.brandCard
-            if let u = safeURL(url) {
-                AsyncImage(url: u, transaction: Transaction(animation: .easeIn(duration: 0.2))) { phase in
-                    switch phase {
-                    case .success(let img):
-                        img.resizable().scaledToFill()
-                    case .failure:
-                        Image(systemName: "film").foregroundColor(.gray)
-                    default:
-                        Color.brandCard
-                    }
-                }
+            LinearGradient(colors: [Color.brandCard, Color.brandBg2],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            if let image = image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .transition(.opacity)
+            } else if failed {
+                Image(systemName: "film")
+                    .font(.system(size: 20))
+                    .foregroundColor(.white.opacity(0.25))
+            } else {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.6)))
+                    .scaleEffect(0.8)
             }
         }
         .clipped()
+        .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        if image != nil { return }
+        if let cached = ImageLoader.memory.object(forKey: url as NSString) {
+            image = cached
+            return
+        }
+        let img = await ImageLoader.load(url)
+        if let img = img {
+            withAnimation(.easeIn(duration: 0.25)) { image = img }
+        } else {
+            failed = true
+        }
+    }
+}
+
+// MARK: - Shared views
+
+struct PressScaleStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1.0)
+            .opacity(configuration.isPressed ? 0.85 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
 }
 
 struct RatingBadge: View {
     let rating: Double
     var body: some View {
-        HStack(spacing: 2) {
-            Image(systemName: "star.fill").font(.system(size: 8)).foregroundColor(.yellow)
-            Text(String(format: "%.1f", rating)).font(.system(size: 10, weight: .bold)).foregroundColor(.white)
+        HStack(spacing: 3) {
+            Image(systemName: "star.fill").font(.system(size: 9)).foregroundColor(Color.brandGold)
+            Text(String(format: "%.1f", rating)).font(.system(size: 10.5, weight: .heavy)).foregroundColor(.white)
         }
-        .padding(.horizontal, 5).padding(.vertical, 2)
-        .background(Color.black.opacity(0.65)).cornerRadius(6)
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(Color.black.opacity(0.55))
+        .background(.ultraThinMaterial)
+        .cornerRadius(7)
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.white.opacity(0.14), lineWidth: 0.5))
+    }
+}
+
+struct DubBadge: View {
+    var body: some View {
+        Text("مدبلج")
+            .font(.system(size: 9, weight: .heavy)).foregroundColor(.white)
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(Color.brandGradient)
+            .cornerRadius(7)
+            .shadow(color: Color.brandPurple.opacity(0.45), radius: 5, y: 2)
     }
 }
 
 struct CardCell: View {
     let card: Card
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topLeading) {
-                PosterView(url: card.p)
+                PosterImage(url: card.p)
                     .aspectRatio(2/3, contentMode: .fill)
                     .frame(maxWidth: .infinity)
-                    .cornerRadius(10)
-                if let r = card.r { RatingBadge(rating: r).padding(5) }
+                    .cornerRadius(13)
+                    .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.09), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.35), radius: 7, y: 4)
+                if let r = card.r { RatingBadge(rating: r).padding(6) }
                 if card.dub {
-                    Text("مدبلج").font(.system(size: 9, weight: .bold)).foregroundColor(.white)
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(Color.brandPurple).cornerRadius(6)
-                        .padding(5)
+                    DubBadge()
+                        .padding(6)
                         .frame(maxWidth: .infinity, alignment: .topTrailing)
+                }
+                if !card.q.isEmpty {
+                    Text(card.q)
+                        .font(.system(size: 9, weight: .bold)).foregroundColor(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Color.black.opacity(0.55)).cornerRadius(6)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 }
             }
             Text(card.t.isEmpty ? card.l : card.t)
-                .font(.system(size: 12, weight: .semibold)).foregroundColor(.white)
+                .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.white)
                 .lineLimit(1)
             HStack(spacing: 4) {
                 if let y = card.y { Text(String(y)) }
                 if card.isSeriesLike, let e = card.e { Text("• \(e) حلقة") }
-                if !card.q.isEmpty { Text("• \(card.q)") }
+                Text("• \(card.kindName)")
             }
             .font(.system(size: 10)).foregroundColor(.gray)
             .lineLimit(1)
@@ -417,19 +541,32 @@ struct CardCell: View {
     }
 }
 
+struct SectionHeader: View {
+    let title: String
+    var body: some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color.brandGradient)
+                .frame(width: 4, height: 19)
+            Text(title)
+                .font(.system(size: 17.5, weight: .black)).foregroundColor(.white)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+    }
+}
+
 struct CardRowView: View {
     let title: String
     let cards: [Card]
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.system(size: 17, weight: .bold)).foregroundColor(.white)
-                .padding(.horizontal, 16)
+        VStack(alignment: .leading, spacing: 11) {
+            SectionHeader(title: title)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 12) {
                     ForEach(cards) { card in
                         NavigationLink(destination: DetailView(card: card)) {
-                            CardCell(card: card).frame(width: 108)
+                            CardCell(card: card).frame(width: 110)
                         }
                         .buttonStyle(.plain)
                     }
@@ -446,7 +583,7 @@ struct GridView: View {
     private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
     var body: some View {
         let page = Array(cards.prefix(shown))
-        LazyVGrid(columns: cols, spacing: 16) {
+        LazyVGrid(columns: cols, spacing: 17) {
             ForEach(page.indices, id: \.self) { idx in
                 NavigationLink(destination: DetailView(card: page[idx])) {
                     CardCell(card: page[idx])
@@ -466,15 +603,32 @@ struct SplashView: View {
     var body: some View {
         ZStack {
             Color.brandBg.ignoresSafeArea()
-            VStack(spacing: 16) {
+            RadialGradient(colors: [Color.brandPurple.opacity(0.35), .clear],
+                           center: .top, startRadius: 40, endRadius: 420)
+                .ignoresSafeArea()
+            VStack(spacing: 18) {
                 Text("شوفها")
-                    .font(.system(size: 44, weight: .black))
+                    .font(.system(size: 52, weight: .black))
                     .foregroundStyle(Color.brandGradient)
+                    .shadow(color: Color.brandPurple.opacity(0.5), radius: 24, y: 6)
                 ProgressView()
                     .progressViewStyle(CircularProgressViewStyle(tint: .white))
                     .scaleEffect(1.3)
             }
         }
+    }
+}
+
+struct AmbienceBackground: View {
+    var body: some View {
+        ZStack {
+            Color.brandBg
+            RadialGradient(colors: [Color.brandViolet.opacity(0.22), .clear],
+                           center: .topTrailing, startRadius: 30, endRadius: 460)
+            RadialGradient(colors: [Color.brandCyan.opacity(0.08), .clear],
+                           center: .topLeading, startRadius: 30, endRadius: 380)
+        }
+        .ignoresSafeArea()
     }
 }
 
@@ -487,7 +641,7 @@ struct ContentView: View {
         Group {
             if let err = store.loadError, store.home == nil {
                 ZStack {
-                    Color.brandBg.ignoresSafeArea()
+                    AmbienceBackground()
                     VStack(spacing: 14) {
                         Text("📡").font(.system(size: 44))
                         Text("ماكو اتصال").font(.headline).foregroundColor(.white)
@@ -496,8 +650,10 @@ struct ContentView: View {
                             store.loadError = nil
                             Task { await store.loadHome() }
                         }
-                        .padding(.horizontal, 22).padding(.vertical, 10)
-                        .background(Color.brandGradient).foregroundColor(.white).cornerRadius(12)
+                        .buttonStyle(PressScaleStyle())
+                        .padding(.horizontal, 26).padding(.vertical, 12)
+                        .background(Color.brandGradient).foregroundColor(.white).cornerRadius(14)
+                        .shadow(color: Color.brandPurple.opacity(0.45), radius: 12, y: 5)
                     }
                 }
             } else if store.home == nil {
@@ -538,15 +694,13 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             if let home = store.home {
-                VStack(alignment: .leading, spacing: 26) {
+                VStack(alignment: .leading, spacing: 30) {
                     HeroPager(cards: home.hero)
                     CardRowView(title: "🔥 ترند شوفها اليوم", cards: home.trend)
 
                     if !home.cols.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("مجموعات مختارة")
-                                .font(.system(size: 17, weight: .bold)).foregroundColor(.white)
-                                .padding(.horizontal, 16)
+                        VStack(alignment: .leading, spacing: 11) {
+                            SectionHeader(title: "مجموعات مختارة")
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 12) {
                                     ForEach(home.cols) { col in
@@ -567,11 +721,13 @@ struct HomeView: View {
                                 ForEach(home.genres, id: \.self) { genre in
                                     NavigationLink(destination: GenreView(genre: genre)) {
                                         Text(genre)
-                                            .font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                                            .padding(.horizontal, 14).padding(.vertical, 8)
-                                            .background(Color.brandCard).cornerRadius(16)
+                                            .font(.system(size: 13, weight: .bold)).foregroundColor(.white)
+                                            .padding(.horizontal, 15).padding(.vertical, 9)
+                                            .background(Color.white.opacity(0.06))
+                                            .cornerRadius(17)
+                                            .overlay(RoundedRectangle(cornerRadius: 17).stroke(Color.white.opacity(0.1), lineWidth: 1))
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(PressScaleStyle())
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -583,21 +739,23 @@ struct HomeView: View {
                     CardRowView(title: "🌸 أحدث الأنمي", cards: home.anime)
 
                     if !home.turk.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 11) {
                             HStack {
-                                Text("🇹🇷 مسلسلات تركية")
-                                    .font(.system(size: 17, weight: .bold)).foregroundColor(.white)
-                                Spacer()
+                                SectionHeader(title: "🇹🇷 مسلسلات تركية")
                                 NavigationLink(destination: TurkView()) {
-                                    Text("الكل").font(.system(size: 13)).foregroundColor(Color.brandCyan)
+                                    HStack(spacing: 3) {
+                                        Text("الكل").font(.system(size: 13, weight: .bold))
+                                        Image(systemName: "chevron.left").font(.system(size: 10, weight: .bold))
+                                    }
+                                    .foregroundColor(Color.brandCyan)
                                 }
+                                .padding(.leading, 16)
                             }
-                            .padding(.horizontal, 16)
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(alignment: .top, spacing: 12) {
                                     ForEach(home.turk) { card in
                                         NavigationLink(destination: DetailView(card: card)) {
-                                            CardCell(card: card).frame(width: 108)
+                                            CardCell(card: card).frame(width: 110)
                                         }
                                         .buttonStyle(.plain)
                                     }
@@ -608,22 +766,24 @@ struct HomeView: View {
                     }
 
                     Link(destination: URL(string: "https://t.me/shofha10")!) {
-                        HStack {
+                        HStack(spacing: 9) {
                             Image(systemName: "paperplane.fill")
-                            Text("تابعنا على تيليجرام").font(.system(size: 14, weight: .semibold))
+                            Text("تابعنا على تيليجرام").font(.system(size: 14.5, weight: .black))
                         }
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(Color.brandGradient).cornerRadius(12)
+                        .padding(.vertical, 14)
+                        .background(Color.brandGradientV).cornerRadius(15)
+                        .shadow(color: Color.brandPurple.opacity(0.4), radius: 12, y: 5)
                     }
+                    .buttonStyle(PressScaleStyle())
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 10)
+                    .padding(.bottom, 12)
                 }
-                .padding(.top, 4)
+                .padding(.top, 2)
             }
         }
-        .background(Color.brandBg.ignoresSafeArea())
+        .background(AmbienceBackground())
         .navigationTitle("شوفها")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -632,43 +792,92 @@ struct HomeView: View {
 struct HeroPager: View {
     let cards: [Card]
     @State private var page = 0
+
     var body: some View {
-        TabView(selection: $page) {
-            ForEach(cards.prefix(8).indices, id: \.self) { idx in
-                NavigationLink(destination: DetailView(card: cards[idx])) {
-                    ZStack(alignment: .bottomLeading) {
-                        PosterView(url: cards[idx].p)
-                        LinearGradient(colors: [.clear, Color.brandBg],
-                                       startPoint: .center, endPoint: .bottom)
-                        VStack(alignment: .leading, spacing: 6) {
-                            if let r = cards[idx].r {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "star.fill").foregroundColor(.yellow).font(.system(size: 11))
-                                    Text(String(format: "%.1f", r)).font(.system(size: 12, weight: .bold)).foregroundColor(.white)
-                                    if let y = cards[idx].y { Text("• \(String(y))").font(.system(size: 12)).foregroundColor(.gray) }
-                                }
-                            }
-                            Text(cards[idx].t.isEmpty ? cards[idx].l : cards[idx].t)
-                                .font(.system(size: 22, weight: .black)).foregroundColor(.white)
-                                .lineLimit(2).multilineTextAlignment(.leading)
-                            HStack(spacing: 6) {
-                                Image(systemName: "play.fill").font(.system(size: 12))
-                                Text("شاهد الآن").font(.system(size: 13, weight: .bold))
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 16).padding(.vertical, 8)
-                            .background(Color.brandGradient).cornerRadius(20)
-                        }
-                        .padding(16)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        let top = Array(cards.prefix(8))
+        ZStack(alignment: .bottom) {
+            TabView(selection: $page) {
+                ForEach(top.indices, id: \.self) { idx in
+                    NavigationLink(destination: DetailView(card: top[idx])) {
+                        HeroSlide(card: top[idx])
                     }
+                    .buttonStyle(.plain)
+                    .tag(idx)
                 }
-                .buttonStyle(.plain)
-                .tag(idx)
+            }
+            .tabViewStyle(PageTabViewStyle(indexDisplayMode: .never))
+            .frame(height: 470)
+
+            HStack(spacing: 5) {
+                ForEach(top.indices, id: \.self) { idx in
+                    Capsule()
+                        .fill(idx == page ? Color.white : Color.white.opacity(0.3))
+                        .frame(width: idx == page ? 20 : 6, height: 6)
+                        .animation(.easeInOut(duration: 0.25), value: page)
+                }
+            }
+            .padding(.bottom, 10)
+        }
+        .onReceive(Timer.publish(every: 5.5, on: .main, in: .common).autoconnect()) { _ in
+            guard !top.isEmpty else { return }
+            withAnimation(.easeInOut(duration: 0.55)) {
+                page = (page + 1) % top.count
             }
         }
-        .tabViewStyle(PageTabViewStyle(indexDisplayMode: .automatic))
-        .frame(height: 460)
+    }
+}
+
+struct HeroSlide: View {
+    let card: Card
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            PosterImage(url: card.p)
+            LinearGradient(colors: [.clear, Color.brandBg.opacity(0.55), Color.brandBg],
+                           startPoint: .top, endPoint: .bottom)
+            LinearGradient(colors: [Color.brandBg.opacity(0.35), .clear],
+                           startPoint: .bottom, endPoint: .top)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    if let r = card.r { RatingBadge(rating: r) }
+                    if let y = card.y {
+                        Text(String(y))
+                            .font(.system(size: 10.5, weight: .bold)).foregroundColor(.white)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(Color.black.opacity(0.5)).cornerRadius(7)
+                    }
+                    Text(card.kindName)
+                        .font(.system(size: 10.5, weight: .bold)).foregroundColor(.white)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Color.brandPurple.opacity(0.75)).cornerRadius(7)
+                }
+                Text(card.t.isEmpty ? card.l : card.t)
+                    .font(.system(size: 25, weight: .black)).foregroundColor(.white)
+                    .lineLimit(2).multilineTextAlignment(.leading)
+                    .shadow(color: .black.opacity(0.6), radius: 10, y: 3)
+                if !card.g.isEmpty {
+                    Text(card.g.prefix(3).joined(separator: " • "))
+                        .font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
+                        .lineLimit(1)
+                }
+                HStack(spacing: 7) {
+                    ZStack {
+                        Circle().fill(Color.white)
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 11, weight: .black))
+                            .foregroundColor(Color.brandViolet)
+                    }
+                    .frame(width: 27, height: 27)
+                    Text("شاهد الآن").font(.system(size: 14.5, weight: .black))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 18).padding(.vertical, 10)
+                .background(Color.brandGradient).cornerRadius(24)
+                .shadow(color: Color.brandPurple.opacity(0.55), radius: 13, y: 5)
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 30)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -686,7 +895,7 @@ struct CollectionCard: View {
             if let posters = info.posters, posters.count >= 3 {
                 HStack(spacing: 4) {
                     ForEach(posters.prefix(3), id: \.self) { p in
-                        PosterView(url: p).frame(width: 52, height: 76).cornerRadius(6)
+                        PosterImage(url: p).frame(width: 52, height: 76).cornerRadius(7)
                     }
                 }
                 .padding(10)
@@ -694,16 +903,19 @@ struct CollectionCard: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(info.brand ?? info.name)
-                    .font(.system(size: 15, weight: .black)).foregroundColor(info.titleColor)
+                    .font(.system(size: 15.5, weight: .black)).foregroundColor(info.titleColor)
                     .lineLimit(1)
+                    .shadow(color: .black.opacity(0.35), radius: 5, y: 2)
                 if let count = info.count {
-                    Text("\(count) عنوان").font(.system(size: 11)).foregroundColor(info.titleColor.opacity(0.8))
+                    Text("\(count) عنوان").font(.system(size: 11, weight: .semibold)).foregroundColor(info.titleColor.opacity(0.85))
                 }
             }
-            .padding(10)
+            .padding(11)
         }
-        .frame(width: 190, height: 150)
-        .cornerRadius(14)
+        .frame(width: 192, height: 152)
+        .cornerRadius(16)
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.13), lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 9, y: 5)
     }
 }
 
@@ -719,7 +931,7 @@ struct CollectionView: View {
                 GridView(cards: cards)
             }
         }
-        .background(Color.brandBg.ignoresSafeArea())
+        .background(AmbienceBackground())
         .navigationTitle(info.name)
         .task { cards = await store.collectionCards(info.id) }
     }
@@ -731,7 +943,7 @@ struct TurkView: View {
         ScrollView {
             GridView(cards: store.turkCards.isEmpty ? (store.home?.turk ?? []) : store.turkCards)
         }
-        .background(Color.brandBg.ignoresSafeArea())
+        .background(AmbienceBackground())
         .navigationTitle("مسلسلات تركية")
     }
 }
@@ -751,7 +963,7 @@ struct GenreView: View {
                 .padding(.top, 60)
             }
         }
-        .background(Color.brandBg.ignoresSafeArea())
+        .background(AmbienceBackground())
         .navigationTitle(genre)
     }
 }
@@ -766,7 +978,7 @@ struct BrowseView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 15) {
                 if let home = store.home, !home.genres.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
@@ -782,7 +994,7 @@ struct BrowseView: View {
             }
             .padding(.top, 10)
         }
-        .background(Color.brandBg.ignoresSafeArea())
+        .background(AmbienceBackground())
         .navigationTitle(title)
     }
 
@@ -795,13 +1007,15 @@ struct BrowseView: View {
     private func chip(_ text: String, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(text)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(active ? .white : .gray)
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .background(active ? Color.brandPurple : Color.brandCard)
-                .cornerRadius(16)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 15).padding(.vertical, 9)
+                .background(active ? Color.brandGradient : Color.white.opacity(0.06))
+                .cornerRadius(17)
+                .overlay(RoundedRectangle(cornerRadius: 17).stroke(Color.white.opacity(active ? 0 : 0.1), lineWidth: 1))
+                .shadow(color: active ? Color.brandPurple.opacity(0.4) : .clear, radius: 8, y: 3)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleStyle())
     }
 }
 
@@ -811,9 +1025,9 @@ struct SearchView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundColor(.gray)
+            VStack(alignment: .leading, spacing: 15) {
+                HStack(spacing: 9) {
+                    Image(systemName: "magnifyingglass").foregroundColor(Color.brandCyan)
                     TextField("ابحث عن فيلم أو مسلسل...", text: $query)
                         .foregroundColor(.white)
                         .submitLabel(.search)
@@ -823,21 +1037,23 @@ struct SearchView: View {
                         }
                     }
                 }
-                .padding(12)
-                .background(Color.brandCard).cornerRadius(12)
+                .padding(13)
+                .background(Color.white.opacity(0.06)).cornerRadius(14)
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.1), lineWidth: 1))
                 .padding(.horizontal, 16)
 
                 if query.trimmingCharacters(in: .whitespaces).count < 2 {
                     VStack(spacing: 10) {
+                        Text("🔍").font(.system(size: 34))
                         Text("ابحث بالعربي أو بالإنجليزي")
-                            .font(.system(size: 14)).foregroundColor(.gray)
+                            .font(.system(size: 14.5, weight: .semibold)).foregroundColor(.white.opacity(0.85))
                         if !store.indexReady {
                             Text("جاري تحميل الكتالوج كامل للبحث...")
                                 .font(.footnote).foregroundColor(.gray)
                         }
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.top, 40)
+                    .padding(.top, 46)
                 } else {
                     let results = store.search(query)
                     if results.isEmpty {
@@ -851,7 +1067,7 @@ struct SearchView: View {
             }
             .padding(.top, 10)
         }
-        .background(Color.brandBg.ignoresSafeArea())
+        .background(AmbienceBackground())
         .navigationTitle("بحث")
     }
 }
@@ -867,16 +1083,16 @@ struct DetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 20) {
                 header
                 if let det = detail {
                     if !det.story.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("القصة").font(.system(size: 16, weight: .bold)).foregroundColor(.white)
-                            Text(det.story).font(.system(size: 14)).foregroundColor(.gray)
-                                .lineSpacing(4).frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 7) {
+                            SectionHeader(title: "القصة")
+                            Text(det.story).font(.system(size: 14)).foregroundColor(.white.opacity(0.75))
+                                .lineSpacing(5).frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16)
                         }
-                        .padding(.horizontal, 16)
                     }
                     watchSection(det)
                 } else {
@@ -884,9 +1100,9 @@ struct DetailView: View {
                         .frame(maxWidth: .infinity).padding(.top, 30)
                 }
             }
-            .padding(.bottom, 24)
+            .padding(.bottom, 26)
         }
-        .background(Color.brandBg.ignoresSafeArea())
+        .background(AmbienceBackground())
         .navigationBarTitleDisplayMode(.inline)
         .task {
             detail = await store.detail(for: card)
@@ -896,21 +1112,24 @@ struct DetailView: View {
 
     private var header: some View {
         ZStack(alignment: .bottomLeading) {
-            PosterView(url: card.p)
-                .frame(height: 340)
-                .blur(radius: 24)
-                .opacity(0.55)
+            PosterImage(url: card.p)
+                .frame(height: 350)
+                .blur(radius: 26)
+                .opacity(0.5)
             LinearGradient(colors: [.clear, Color.brandBg], startPoint: .top, endPoint: .bottom)
-            HStack(alignment: .bottom, spacing: 14) {
-                PosterView(url: card.p)
-                    .frame(width: 110, height: 165)
-                    .cornerRadius(10)
-                VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .bottom, spacing: 15) {
+                PosterImage(url: card.p)
+                    .frame(width: 112, height: 168)
+                    .cornerRadius(13)
+                    .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.16), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.55), radius: 16, y: 8)
+                VStack(alignment: .leading, spacing: 7) {
                     Text(card.t.isEmpty ? card.l : card.t)
-                        .font(.system(size: 20, weight: .black)).foregroundColor(.white)
+                        .font(.system(size: 21, weight: .black)).foregroundColor(.white)
                         .lineLimit(3)
+                        .shadow(color: .black.opacity(0.6), radius: 8, y: 2)
                     if !card.l.isEmpty && card.l != card.t {
-                        Text(card.l).font(.system(size: 12)).foregroundColor(.gray).lineLimit(1)
+                        Text(card.l).font(.system(size: 12)).foregroundColor(.white.opacity(0.65)).lineLimit(1)
                     }
                     HStack(spacing: 6) {
                         metaChip(card.kindName)
@@ -933,38 +1152,44 @@ struct DetailView: View {
                     }
                     if !card.g.isEmpty {
                         Text(card.g.joined(separator: " • "))
-                            .font(.system(size: 11)).foregroundColor(Color.brandCyan).lineLimit(2)
+                            .font(.system(size: 11.5, weight: .semibold)).foregroundColor(Color.brandCyan).lineLimit(2)
                     }
                 }
             }
             .padding(16)
         }
-        .frame(height: 340)
+        .frame(height: 350)
     }
 
     private func metaChip(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold)).foregroundColor(.white)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.white.opacity(0.14)).cornerRadius(8)
+            .font(.system(size: 11, weight: .bold)).foregroundColor(.white)
+            .padding(.horizontal, 9).padding(.vertical, 4.5)
+            .background(Color.black.opacity(0.45))
+            .background(.ultraThinMaterial)
+            .cornerRadius(9)
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(0.13), lineWidth: 0.5))
     }
 
     @ViewBuilder
     private func watchSection(_ det: Detail) -> some View {
         if !seasonNumbers(of: det).isEmpty {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 15) {
+                SectionHeader(title: "الحلقات")
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(seasonNumbers(of: det), id: \.self) { s in
                             Button(action: { season = s; episode = nil }) {
                                 Text("الموسم \(s)")
                                     .font(.system(size: 13, weight: .bold))
-                                    .foregroundColor(season == s ? .white : .gray)
-                                    .padding(.horizontal, 16).padding(.vertical, 9)
-                                    .background(season == s ? Color.brandPurple : Color.brandCard)
-                                    .cornerRadius(18)
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 17).padding(.vertical, 10)
+                                    .background(season == s ? Color.brandGradient : Color.white.opacity(0.06))
+                                    .cornerRadius(19)
+                                    .overlay(RoundedRectangle(cornerRadius: 19).stroke(Color.white.opacity(season == s ? 0 : 0.1), lineWidth: 1))
+                                    .shadow(color: season == s ? Color.brandPurple.opacity(0.4) : .clear, radius: 8, y: 3)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PressScaleStyle())
                         }
                     }
                     .padding(.horizontal, 16)
@@ -976,13 +1201,15 @@ struct DetailView: View {
                     ForEach(eps) { ep in
                         Button(action: { episode = ep }) {
                             Text("\(ep.n)")
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundColor(episode?.n == ep.n ? .white : .gray)
-                                .frame(maxWidth: .infinity).padding(.vertical, 12)
-                                .background(episode?.n == ep.n ? Color.brandPurple : Color.brandCard)
-                                .cornerRadius(10)
+                                .font(.system(size: 15.5, weight: .black))
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity).padding(.vertical, 13)
+                                .background(episode?.n == ep.n ? Color.brandGradient : Color.white.opacity(0.06))
+                                .cornerRadius(12)
+                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(episode?.n == ep.n ? 0 : 0.09), lineWidth: 1))
+                                .shadow(color: episode?.n == ep.n ? Color.brandPurple.opacity(0.4) : .clear, radius: 8, y: 3)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PressScaleStyle())
                     }
                 }
                 .padding(.horizontal, 16)
@@ -1012,36 +1239,50 @@ struct DetailView: View {
             if let first = servers.first {
                 NavigationLink(destination: PlayerView(title: title, servers: servers,
                                                        initialURL: defaultURL ?? first.url)) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "play.fill")
-                        Text("شاهد الآن").font(.system(size: 16, weight: .black))
+                    HStack(spacing: 10) {
+                        ZStack {
+                            Circle().fill(Color.white)
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 12, weight: .black))
+                                .foregroundColor(Color.brandViolet)
+                        }
+                        .frame(width: 30, height: 30)
+                        Text("شاهد الآن").font(.system(size: 16.5, weight: .black))
                     }
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity).padding(.vertical, 14)
-                    .background(Color.brandGradient).cornerRadius(14)
+                    .background(Color.brandGradient).cornerRadius(15)
+                    .shadow(color: Color.brandPurple.opacity(0.5), radius: 14, y: 6)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressScaleStyle())
                 .padding(.horizontal, 16)
             }
-            Text("السيرفرات")
-                .font(.system(size: 15, weight: .bold)).foregroundColor(.white)
-                .padding(.horizontal, 16)
+            SectionHeader(title: "السيرفرات")
             ForEach(servers.indices, id: \.self) { si in
                 let srv = servers[si]
                 NavigationLink(destination: PlayerView(title: title, servers: servers, initialURL: srv.url)) {
-                    HStack {
-                        Image(systemName: "play.rectangle.fill").foregroundColor(Color.brandCyan)
-                        Text(srv.label).font(.system(size: 14, weight: .semibold)).foregroundColor(.white)
+                    HStack(spacing: 11) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 10).fill(Color.brandGradient)
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 11, weight: .black)).foregroundColor(.white)
+                        }
+                        .frame(width: 34, height: 34)
+                        Text(srv.label).font(.system(size: 14.5, weight: .bold)).foregroundColor(.white)
                         Spacer()
                         if srv.url == defaultURL {
-                            Text("افتراضي").font(.system(size: 10)).foregroundColor(.gray)
+                            Text("افتراضي")
+                                .font(.system(size: 10, weight: .bold)).foregroundColor(Color.brandGold)
+                                .padding(.horizontal, 8).padding(.vertical, 3.5)
+                                .background(Color.brandGold.opacity(0.14)).cornerRadius(8)
                         }
-                        Image(systemName: "chevron.left").font(.system(size: 11)).foregroundColor(.gray)
+                        Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold)).foregroundColor(.gray)
                     }
-                    .padding(14)
-                    .background(Color.brandCard).cornerRadius(12)
+                    .padding(13)
+                    .background(Color.white.opacity(0.05)).cornerRadius(14)
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressScaleStyle())
                 .padding(.horizontal, 16)
             }
         }
@@ -1068,6 +1309,10 @@ struct PlayerView: View {
                 PlayerWebView(url: currentURL)
             }
             .aspectRatio(16/9, contentMode: .fit)
+            .cornerRadius(14)
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.1), lineWidth: 1))
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
 
             if servers.count > 1 {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1076,27 +1321,35 @@ struct PlayerView: View {
                             let srv = servers[si]
                             Button(action: { currentURL = cleanURL(srv.url) }) {
                                 Text(srv.label)
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(cleanURL(srv.url) == currentURL ? .white : .gray)
-                                    .padding(.horizontal, 14).padding(.vertical, 8)
-                                    .background(cleanURL(srv.url) == currentURL ? Color.brandPurple : Color.brandCard)
-                                    .cornerRadius(16)
+                                    .font(.system(size: 12.5, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 15).padding(.vertical, 9)
+                                    .background(cleanURL(srv.url) == currentURL ? Color.brandGradient : Color.white.opacity(0.06))
+                                    .cornerRadius(17)
+                                    .overlay(RoundedRectangle(cornerRadius: 17).stroke(Color.white.opacity(cleanURL(srv.url) == currentURL ? 0 : 0.1), lineWidth: 1))
+                                    .shadow(color: cleanURL(srv.url) == currentURL ? Color.brandPurple.opacity(0.4) : .clear, radius: 8, y: 3)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PressScaleStyle())
                         }
                     }
                     .padding(.horizontal, 16)
                 }
-                .padding(.vertical, 12)
+                .padding(.vertical, 13)
             }
 
-            Text("إذا توقف السيرفر، بدّل لسيرفر ثاني من الأزرار فوق. صغّر الفيديو لصورة داخل صورة (PiP) من زر ملء الشاشة داخل المشغّل.")
-                .font(.system(size: 12)).foregroundColor(.gray)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
+            HStack(spacing: 8) {
+                Image(systemName: "lightbulb.fill").foregroundColor(Color.brandGold).font(.system(size: 13))
+                Text("إذا توقف السيرفر بدّل لغيره من الأزرار فوق، وللصورة داخل صورة (PiP) كبّر الفيديو من زر ملء الشاشة داخل المشغّل.")
+                    .font(.system(size: 12)).foregroundColor(.white.opacity(0.7))
+                    .multilineTextAlignment(.leading)
+            }
+            .padding(13)
+            .background(Color.white.opacity(0.04)).cornerRadius(13)
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
             Spacer()
         }
-        .background(Color.brandBg.ignoresSafeArea())
+        .background(AmbienceBackground())
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
     }
