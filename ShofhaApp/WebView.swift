@@ -137,35 +137,6 @@ struct Episode: Decodable, Identifiable {
     enum CodingKeys: String, CodingKey { case n, servers, date; case defaultURL = "default" }
 }
 
-struct Detail {
-    var story: String
-    var servers: [Server]
-    var defaultURL: String?
-    var dur: Int?
-    var country: String
-    var seasons: [String: [Episode]]
-    var seasonNumbers: [Int] { seasons.keys.compactMap { Int($0) }.sorted() }
-}
-
-extension Detail: Decodable {
-    enum CodingKeys: String, CodingKey { case story, servers, dur, country, seasons; case defaultURL = "default" }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        story = try c.decodeIfPresent(String.self, forKey: .story) ?? ""
-        servers = try c.decodeIfPresent([Server].self, forKey: .servers) ?? []
-        defaultURL = try c.decodeIfPresent(String.self, forKey: .defaultURL)
-        var parsedDur: Int? = nil
-        if let dv = try? c.decodeIfPresent(Int.self, forKey: .dur), let v = dv {
-            parsedDur = v
-        } else if let ds = try? c.decodeIfPresent(String.self, forKey: .dur), let sv = ds {
-            parsedDur = Int(sv)
-        }
-        dur = parsedDur
-        country = try c.decodeIfPresent(String.self, forKey: .country) ?? ""
-        seasons = try c.decodeIfPresent([String: [Episode]].self, forKey: .seasons) ?? [:]
-    }
-}
-
 
 struct ContentView: View {
     var body: some View {
