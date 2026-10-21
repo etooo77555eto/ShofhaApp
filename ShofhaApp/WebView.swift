@@ -103,7 +103,7 @@ struct Card: Identifiable, Hashable {
     }
 }
 
-extension Card: Codable {
+extension Card: Decodable {
     enum CodingKeys: String, CodingKey { case i, t, l, p, y, g, r, k, e, sc, d, dub, q }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -123,12 +123,12 @@ extension Card: Codable {
     }
 }
 
-struct Server: Codable, Hashable {
+struct Server: Decodable, Hashable {
     var label: String
     var url: String
 }
 
-struct Episode: Codable, Identifiable {
+struct Episode: Decodable, Identifiable {
     var n: Int
     var servers: [Server]
     var defaultURL: String?
@@ -147,26 +147,26 @@ struct Detail {
     var seasonNumbers: [Int] { seasons.keys.compactMap { Int($0) }.sorted() }
 }
 
-extension Detail: Codable {
+extension Detail: Decodable {
     enum CodingKeys: String, CodingKey { case story, servers, dur, country, seasons; case defaultURL = "default" }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         story = try c.decodeIfPresent(String.self, forKey: .story) ?? ""
         servers = try c.decodeIfPresent([Server].self, forKey: .servers) ?? []
         defaultURL = try c.decodeIfPresent(String.self, forKey: .defaultURL)
-        if let d = try? c.decodeIfPresent(Int.self, forKey: .dur) {
-            dur = d
-        } else if let ds = try? c.decodeIfPresent(String.self, forKey: .dur) {
-            dur = ds.flatMap { Int($0) }
-        } else {
-            dur = nil
+        var parsedDur: Int? = nil
+        if let dv = try? c.decodeIfPresent(Int.self, forKey: .dur), let v = dv {
+            parsedDur = v
+        } else if let ds = try? c.decodeIfPresent(String.self, forKey: .dur), let sv = ds {
+            parsedDur = Int(sv)
         }
+        dur = parsedDur
         country = try c.decodeIfPresent(String.self, forKey: .country) ?? ""
         seasons = try c.decodeIfPresent([String: [Episode]].self, forKey: .seasons) ?? [:]
     }
 }
 
-struct CollectionInfo: Codable, Identifiable {
+struct CollectionInfo: Decodable, Identifiable {
     var id: String
     var name: String
     var brand: String?
@@ -179,7 +179,7 @@ struct CollectionInfo: Codable, Identifiable {
     var titleColor: Color { fg.map { Color(hex: $0) } ?? .white }
 }
 
-struct HomeData: Codable {
+struct HomeData: Decodable {
     var hero: [Card]
     var trend: [Card]
     var films: [Card]
@@ -190,7 +190,7 @@ struct HomeData: Codable {
     var turk: [Card]
 }
 
-struct Manifest: Codable {
+struct Manifest: Decodable {
     var indexParts: [String]
     var buckets: Int
     var total: Int
@@ -417,10 +417,11 @@ struct GridView: View {
     @State private var shown = 90
     private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
     var body: some View {
+        let page = Array(cards.prefix(shown))
         LazyVGrid(columns: cols, spacing: 16) {
-            ForEach(Array(cards.prefix(shown).enumerated()), id: \.element.i) { idx, card in
-                NavigationLink(destination: DetailView(card: card)) {
-                    CardCell(card: card)
+            ForEach(page.indices, id: \.self) { idx in
+                NavigationLink(destination: DetailView(card: page[idx])) {
+                    CardCell(card: page[idx])
                 }
                 .buttonStyle(.plain)
                 .onAppear {
@@ -605,21 +606,21 @@ struct HeroPager: View {
     @State private var page = 0
     var body: some View {
         TabView(selection: $page) {
-            ForEach(Array(cards.prefix(8).enumerated()), id: \.element.i) { idx, card in
-                NavigationLink(destination: DetailView(card: card)) {
+            ForEach(cards.prefix(8).indices, id: \.self) { idx in
+                NavigationLink(destination: DetailView(card: cards[idx])) {
                     ZStack(alignment: .bottomLeading) {
-                        PosterView(url: card.p)
+                        PosterView(url: cards[idx].p)
                         LinearGradient(colors: [.clear, Color.brandBg],
                                        startPoint: .center, endPoint: .bottom)
                         VStack(alignment: .leading, spacing: 6) {
-                            if let r = card.r {
+                            if let r = cards[idx].r {
                                 HStack(spacing: 3) {
                                     Image(systemName: "star.fill").foregroundColor(.yellow).font(.system(size: 11))
                                     Text(String(format: "%.1f", r)).font(.system(size: 12, weight: .bold)).foregroundColor(.white)
-                                    if let y = card.y { Text("• \(String(y))").font(.system(size: 12)).foregroundColor(.gray) }
+                                    if let y = cards[idx].y { Text("• \(String(y))").font(.system(size: 12)).foregroundColor(.gray) }
                                 }
                             }
-                            Text(card.t.isEmpty ? card.l : card.t)
+                            Text(cards[idx].t.isEmpty ? cards[idx].l : cards[idx].t)
                                 .font(.system(size: 22, weight: .black)).foregroundColor(.white)
                                 .lineLimit(2).multilineTextAlignment(.leading)
                             HStack(spacing: 6) {
@@ -733,7 +734,7 @@ struct BrowseView: View {
     let kind: String
     let title: String
     @EnvironmentObject var store: AppStore
-    @State private var genre: String?
+    @State private var genre: String? = nil
 
     var body: some View {
         ScrollView {
@@ -834,7 +835,7 @@ struct DetailView: View {
     @EnvironmentObject var store: AppStore
     @State private var detail: Detail?
     @State private var season: Int = 0
-    @State private var episode: Episode?
+    @State private var episode: Episode? = nil
 
     var body: some View {
         ScrollView {
@@ -997,7 +998,8 @@ struct DetailView: View {
             Text("السيرفرات")
                 .font(.system(size: 15, weight: .bold)).foregroundColor(.white)
                 .padding(.horizontal, 16)
-            ForEach(Array(servers.enumerated()), id: \.offset) { _, srv in
+            ForEach(servers.indices, id: \.self) { si in
+                let srv = servers[si]
                 NavigationLink(destination: PlayerView(title: title, servers: servers, initialURL: srv.url)) {
                     HStack {
                         Image(systemName: "play.rectangle.fill").foregroundColor(Color.brandCyan)
@@ -1042,7 +1044,8 @@ struct PlayerView: View {
             if servers.count > 1 {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(Array(servers.enumerated()), id: \.offset) { _, srv in
+                        ForEach(servers.indices, id: \.self) { si in
+                            let srv = servers[si]
                             Button(action: { currentURL = cleanURL(srv.url) }) {
                                 Text(srv.label)
                                     .font(.system(size: 12, weight: .bold))
