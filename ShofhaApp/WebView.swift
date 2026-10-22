@@ -1040,9 +1040,9 @@ struct CardCell: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topLeading) {
-                PosterImage(url: card.p)
+                Color.clear
                     .aspectRatio(2/3, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
+                    .overlay(PosterImage(url: card.p))
                     .cornerRadius(13)
                     .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.09), lineWidth: 1))
                     .shadow(color: .black.opacity(0.35), radius: 7, y: 4)
