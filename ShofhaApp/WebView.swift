@@ -1444,21 +1444,30 @@ struct PlayerWebView: UIViewRepresentable {
         private var resolved = false
         private var watchdog: DispatchWorkItem?
         private var probeItem: DispatchWorkItem?
+        private var finishedOnce = false
+        private var probeCycle = 0
+        private var probeIndex = 0
+        private var emptyStreak = 0
 
         static let probeJS = "(function() { var t = ''; try { t = (document.body ? document.body.innerText : '').toLowerCase(); } catch (e) {} var dead = ['file not found', 'video not found', 'file was deleted', 'this video has been deleted', 'video has been removed', 'no longer available', 'الفيديو غير متوفر', 'تم حذف هذا']; for (var i = 0; i < dead.length; i++) { if (t.indexOf(dead[i]) >= 0) { return 'dead'; } } if (document.querySelector('video')) { return 'video'; } if (document.querySelector('iframe')) { return 'frame'; } return 'empty'; })()"
 
         func beginLoad() {
             generation += 1
             resolved = false
+            finishedOnce = false
+            probeCycle = 0
+            probeIndex = 0
+            emptyStreak = 0
             watchdog?.cancel()
             probeItem?.cancel()
             let gen = generation
             let item = DispatchWorkItem { [weak self] in
                 guard let self = self, self.generation == gen, !self.resolved else { return }
+                if self.finishedOnce { return }
                 self.fail()
             }
             watchdog = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 35, execute: item)
         }
 
         private func succeed() {
@@ -1477,22 +1486,29 @@ struct PlayerWebView: UIViewRepresentable {
             onFailure()
         }
 
-        private func scheduleProbe(_ webView: WKWebView, gen: Int, delay: Double, second: Bool) {
+        private func scheduleProbe(_ webView: WKWebView, gen: Int, cycle: Int, delay: Double) {
             probeItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
-                guard let self = self, self.generation == gen, !self.resolved else { return }
+                guard let self = self, self.generation == gen, self.probeCycle == cycle, !self.resolved else { return }
                 webView.evaluateJavaScript(Coordinator.probeJS) { [weak self] result, _ in
-                    guard let self = self, self.generation == gen, !self.resolved else { return }
+                    guard let self = self, self.generation == gen, self.probeCycle == cycle, !self.resolved else { return }
                     let r = (result as? String) ?? "empty"
                     if r == "dead" {
                         self.fail()
-                    } else if r == "video" {
-                        self.succeed()
-                    } else if second {
-                        if r == "frame" { self.succeed() } else { self.fail() }
-                    } else {
-                        self.scheduleProbe(webView, gen: gen, delay: 6, second: true)
+                        return
                     }
+                    if r == "video" || r == "frame" {
+                        self.succeed()
+                        return
+                    }
+                    self.emptyStreak += 1
+                    self.probeIndex += 1
+                    if self.emptyStreak >= 3 || self.probeIndex >= 3 {
+                        self.fail()
+                        return
+                    }
+                    let nextDelay: Double = self.probeIndex == 1 ? 3 : 2
+                    self.scheduleProbe(webView, gen: gen, cycle: cycle, delay: nextDelay)
                 }
             }
             probeItem = item
@@ -1501,14 +1517,30 @@ struct PlayerWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             if resolved { return }
-            scheduleProbe(webView, gen: generation, delay: 4, second: false)
+            finishedOnce = true
+            watchdog?.cancel()
+            probeCycle += 1
+            probeIndex = 0
+            emptyStreak = 0
+            scheduleProbe(webView, gen: generation, cycle: probeCycle, delay: 5)
+        }
+
+        private func isIgnorable(_ error: Error) -> Bool {
+            let e = error as NSError
+            if e.code == NSURLErrorCancelled { return true }
+            if e.domain == "WebKitErrorDomain" && e.code == 102 { return true }
+            let desc = e.localizedDescription.lowercased()
+            if desc.contains("frame load interrupted") { return true }
+            return false
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            if isIgnorable(error) { return }
             fail()
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            if isIgnorable(error) { return }
             fail()
         }
 
