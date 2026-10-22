@@ -1838,13 +1838,13 @@ struct FavoritesView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 4) {
-                NavigationLink(destination: EmptyView()) {
+                NavigationLink(destination: DownloadsView()) {
                     HStack(spacing: 11) {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 20)).foregroundColor(Color.brandCyan)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("تنزيلاتي").font(.system(size: 15, weight: .black)).foregroundColor(.white)
-                            Text("قريباً")
+                            Text(downloads.items.isEmpty ? "لسا ما حمّلت شي" : "\(downloads.items.count) عنوان محمّل على الجهاز")
                                 .font(.system(size: 11.5)).foregroundColor(.gray)
                         }
                         Spacer()
@@ -1959,6 +1959,93 @@ struct DownloadSectionView: View {
             if let st = downloads.status[key] {
                 Text(st).font(.system(size: 12, weight: .semibold)).foregroundColor(.orange)
             }
+        }
+    }
+}
+
+
+struct DownloadsView: View {
+    @EnvironmentObject var downloads: DownloadManager
+
+    var body: some View {
+        ScrollView {
+            if downloads.items.isEmpty {
+                VStack(spacing: 12) {
+                    Text("⬇️").font(.system(size: 42))
+                    Text("لا توجد تنزيلات بعد").font(.headline).foregroundColor(.white)
+                    Text("افتح أي عنوان عنده سيرفر تحميل واضغط «تحميل للمشاهدة بدون نت»")
+                        .font(.footnote).foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity).padding(.top, 90).padding(.horizontal, 30)
+            } else {
+                VStack(spacing: 12) {
+                    ForEach(downloads.items) { item in
+                        HStack(spacing: 12) {
+                            PosterImage(url: item.card.p)
+                                .frame(width: 52, height: 78)
+                                .cornerRadius(8)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.displayTitle)
+                                    .font(.system(size: 14, weight: .bold)).foregroundColor(.white)
+                                    .lineLimit(2)
+                                if let s = item.season, let e = item.episode {
+                                    Text("الموسم \(s) • حلقة \(e)")
+                                        .font(.system(size: 11.5, weight: .semibold)).foregroundColor(Color.brandCyan)
+                                }
+                                Text(String(format: "%.0f MB", Double(item.bytes) / 1_000_000))
+                                    .font(.system(size: 11)).foregroundColor(.gray)
+                            }
+                            Spacer()
+                            NavigationLink(destination: LocalPlayerView(item: item)) {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 30)).foregroundColor(Color.brandCyan)
+                            }
+                            .buttonStyle(.plain)
+                            Button(action: { downloads.delete(item) }) {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 15)).foregroundColor(.red.opacity(0.85))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(11)
+                        .background(Color.white.opacity(0.05)).cornerRadius(14)
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .background(AmbienceBackground())
+        .navigationTitle("تنزيلاتي")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct LocalPlayerView: View {
+    let item: DownloadItem
+    @EnvironmentObject var downloads: DownloadManager
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let player = player {
+                VideoPlayer(player: player)
+            } else {
+                ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+            }
+        }
+        .navigationTitle(item.displayTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            if player == nil {
+                player = AVPlayer(url: downloads.localURL(item))
+            }
+            player?.play()
+        }
+        .onDisappear {
+            player?.pause()
         }
     }
 }
