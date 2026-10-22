@@ -4,6 +4,8 @@ import ImageIO
 import UIKit
 import AVKit
 import UniformTypeIdentifiers
+import Network
+import CoreImage
 
 // MARK: - Theme
 
@@ -1196,6 +1198,7 @@ struct ContentView: View {
     @StateObject private var store = AppStore()
     @StateObject private var library = Library()
     @StateObject private var downloads = DownloadManager()
+    @StateObject private var floating = FloatingSession()
 
     var body: some View {
         Group {
@@ -1219,6 +1222,7 @@ struct ContentView: View {
             } else if store.home == nil {
                 SplashView()
             } else {
+                ZStack {
                 TabView {
                     NavigationView { HomeView() }
                         .navigationViewStyle(.stack)
@@ -1240,11 +1244,16 @@ struct ContentView: View {
                         .tabItem { Label("قائمتي", systemImage: "heart.fill") }
                 }
                 .accentColor(Color.brandCyan)
+                if floating.active {
+                    FloatingPlayerHost()
+                }
+                }
             }
         }
         .environmentObject(store)
         .environmentObject(library)
         .environmentObject(downloads)
+        .environmentObject(floating)
         .environment(\.layoutDirection, .rightToLeft)
         .preferredColorScheme(.dark)
         .task { await store.loadHome() }
@@ -1369,6 +1378,28 @@ struct HomeView: View {
                             }
                         }
                     }
+
+                    NavigationLink(destination: ArchiveView()) {
+                        HStack(spacing: 12) {
+                            Text("🌌").font(.system(size: 27))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("بوابة الأرشيف")
+                                    .font(.system(size: 16, weight: .black)).foregroundColor(.white)
+                                Text("آلاف الأفلام التراثية والكلاسيكية من مكتبة أرشيف الإنترنت العالمية")
+                                    .font(.system(size: 11.5)).foregroundColor(.white.opacity(0.75))
+                                    .lineLimit(2)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 13, weight: .bold)).foregroundColor(.white.opacity(0.7))
+                        }
+                        .padding(15)
+                        .background(LinearGradient(colors: [Color(hex: "1B2A52"), Color(hex: "0E3A45")], startPoint: .leading, endPoint: .trailing))
+                        .cornerRadius(15)
+                        .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                    }
+                    .buttonStyle(PressScaleStyle())
+                    .padding(.horizontal, 16)
 
                     Link(destination: URL(string: "https://t.me/shofha10")!) {
                         HStack(spacing: 9) {
@@ -1928,6 +1959,42 @@ struct FavoritesView: View {
                 .background(Color.white.opacity(0.05)).cornerRadius(14)
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
                 .padding(.horizontal, 16)
+                NavigationLink(destination: TVCastView()) {
+                    HStack(spacing: 11) {
+                        Image(systemName: "tv.fill")
+                            .font(.system(size: 18)).foregroundColor(Color.brandCyan)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("بث للتلفزيون").font(.system(size: 15, weight: .black)).foregroundColor(.white)
+                            Text("شاهد تنزيلاتك على شاشة البيت بنفس الواي فاي")
+                                .font(.system(size: 11.5)).foregroundColor(.gray)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.left").font(.system(size: 12, weight: .bold)).foregroundColor(.gray)
+                    }
+                    .padding(14)
+                    .background(Color.white.opacity(0.05)).cornerRadius(14)
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                NavigationLink(destination: CloudView()) {
+                    HStack(spacing: 11) {
+                        Image(systemName: "icloud.fill")
+                            .font(.system(size: 18)).foregroundColor(Color.brandCyan)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("الحساب السحابي").font(.system(size: 15, weight: .black)).foregroundColor(.white)
+                            Text("اربط التطبيق ببوت شوفها — قائمتك وتقدّمك بكل مكان")
+                                .font(.system(size: 11.5)).foregroundColor(.gray)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.left").font(.system(size: 12, weight: .bold)).foregroundColor(.gray)
+                    }
+                    .padding(14)
+                    .background(Color.white.opacity(0.05)).cornerRadius(14)
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
             if library.favorites.isEmpty {
                 VStack(spacing: 12) {
                     Text("🤍").font(.system(size: 42))
@@ -1952,6 +2019,16 @@ struct FavoritesView: View {
         .background(AmbienceBackground())
         .navigationTitle("قائمتي")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            if CloudSync.token != nil {
+                Task {
+                    if let cloud = await CloudSync.pull() {
+                        library.mergeCloud(favs: cloud.favs, progress: cloud.progress, watched: cloud.watched)
+                        _ = await CloudSync.push(favs: library.favorites, progress: library.progress, watched: Array(library.watched))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2240,24 +2317,928 @@ final class LocalPlayerModel: ObservableObject {
 struct LocalPlayerView: View {
     let item: DownloadItem
     @EnvironmentObject var downloads: DownloadManager
-    @State private var player: AVPlayer?
+    @StateObject private var model = LocalPlayerModel()
+    @State private var rate: Float = 1.0
+    @State private var locked = false
+    @State private var showPicker = false
+    @State private var hasSubs = false
+
+    private let rates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if let player = player {
-                VideoPlayer(player: player)
-            } else {
-                ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+            VStack(spacing: 0) {
+                ZStack(alignment: .bottom) {
+                    VideoPlayer(player: model.player)
+                    if !model.cueText.isEmpty {
+                        Text(model.cueText)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(Color.black.opacity(0.65))
+                            .cornerRadius(8)
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 26)
+                    }
+                }
+                if !locked {
+                    controls
+                }
+                Spacer(minLength: 0)
+            }
+            if locked {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button(action: { locked = false }) {
+                            Image(systemName: "lock.open.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.white)
+                                .padding(11)
+                                .background(Color.black.opacity(0.55))
+                                .clipShape(Circle())
+                        }
+                        .padding(14)
+                    }
+                    Spacer()
+                }
             }
         }
         .navigationTitle(item.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            if player == nil {
-                player = AVPlayer(url: downloads.localURL(item))
+            model.load(url: downloads.localURL(item), key: item.key)
+            loadSubtitlesIfPresent()
+        }
+        .onDisappear {
+            model.stop()
+        }
+        .fileImporter(isPresented: $showPicker, allowedContentTypes: [UTType.data]) { result in
+            if case .success(let url) = result {
+                importSubtitles(from: url)
             }
-            player?.play()
+        }
+    }
+
+    private var controls: some View {
+        VStack(spacing: 13) {
+            HStack(spacing: 26) {
+                Button(action: { model.seek(by: -10) }) {
+                    Image(systemName: "gobackward.10").font(.system(size: 24))
+                }
+                Button(action: { model.togglePlay() }) {
+                    Image(systemName: model.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 44)).foregroundColor(Color.brandCyan)
+                }
+                Button(action: { model.seek(by: 10) }) {
+                    Image(systemName: "goforward.10").font(.system(size: 24))
+                }
+            }
+            .foregroundColor(.white)
+            HStack(spacing: 7) {
+                ForEach(rates, id: \.self) { r in
+                    Button(action: { rate = r; model.setRate(r) }) {
+                        Text(rateLabel(r))
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 11).padding(.vertical, 6)
+                            .background(rate == r ? AnyShapeStyle(Color.brandGradient) : AnyShapeStyle(Color.white.opacity(0.08)))
+                            .cornerRadius(13)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                }
+            }
+            HStack(spacing: 10) {
+                Button(action: { showPicker = true }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "captions.bubble.fill")
+                        Text(hasSubs ? "تغيير ملف الترجمة" : "أضف ترجمة srt")
+                            .font(.system(size: 12.5, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 13).padding(.vertical, 8)
+                    .background(Color.white.opacity(0.08)).cornerRadius(11)
+                }
+                .buttonStyle(PressScaleStyle())
+                if hasSubs {
+                    Button(action: {
+                        model.showSubs.toggle()
+                        if !model.showSubs { model.cueText = "" }
+                    }) {
+                        Text(model.showSubs ? "إخفاء الترجمة" : "إظهار الترجمة")
+                            .font(.system(size: 12.5, weight: .bold)).foregroundColor(Color.brandCyan)
+                            .padding(.horizontal, 13).padding(.vertical, 8)
+                            .background(Color.brandCyan.opacity(0.12)).cornerRadius(11)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                }
+                Spacer()
+                Button(action: { locked = true }) {
+                    Image(systemName: "lock.fill")
+                        .foregroundColor(.white)
+                        .padding(9)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(PressScaleStyle())
+            }
+        }
+        .padding(16)
+        .background(Color.brandBg)
+    }
+
+    private func rateLabel(_ r: Float) -> String {
+        if r == 1.0 { return "1×" }
+        return String(format: "%g×", Double(r))
+    }
+
+    private func loadSubtitlesIfPresent() {
+        let url = subtitleFileURL(for: item)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let data = try? Data(contentsOf: url), let text = decodeSubtitleData(data) else { return }
+        model.cues = parseSRT(text)
+        hasSubs = !model.cues.isEmpty
+    }
+
+    private func importSubtitles(from url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else { return }
+        try? data.write(to: subtitleFileURL(for: item))
+        if let text = decodeSubtitleData(data) {
+            model.cues = parseSRT(text)
+            hasSubs = !model.cues.isEmpty
+            model.showSubs = true
+        }
+    }
+}
+
+// MARK: - TV cast (local HTTP server)
+
+func wifiIPAddress() -> String? {
+    var address: String? = nil
+    var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
+    if getifaddrs(&ifaddr) == 0 {
+        var ptr = ifaddr
+        while let cur = ptr {
+            let iface = cur.pointee
+            if iface.ifa_addr.pointee.sa_family == UInt8(AF_INET) {
+                let name = String(cString: iface.ifa_name)
+                if name == "en0" {
+                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                    getnameinfo(iface.ifa_addr, socklen_t(iface.ifa_addr.pointee.sa_len),
+                                &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+                    address = String(cString: hostname)
+                }
+            }
+            ptr = iface.ifa_next
+        }
+        freeifaddrs(ifaddr)
+    }
+    return address
+}
+
+func qrImage(from string: String) -> UIImage? {
+    let data = Data(string.utf8)
+    guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+    filter.setValue(data, forKey: "inputMessage")
+    filter.setValue("M", forKey: "inputCorrectionLevel")
+    guard let output = filter.outputImage else { return nil }
+    let scaled = output.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+    let ctx = CIContext()
+    guard let cg = ctx.createCGImage(scaled, from: scaled.extent) else { return nil }
+    return UIImage(cgImage: cg)
+}
+
+final class CastServer: ObservableObject {
+    @Published var running = false
+    @Published var urlString: String = ""
+    private var listener: NWListener?
+    private var token: String = ""
+    private var items: [DownloadItem] = []
+    private let queue = DispatchQueue(label: "shofha.cast.server")
+
+    func start(items: [DownloadItem]) {
+        stop()
+        self.items = items
+        let chars = "abcdefghjkmnpqrstuvwxyz23456789"
+        var tok = ""
+        for _ in 0..<10 { if let c = chars.randomElement() { tok.append(c) } }
+        token = tok
+        do {
+            let listener = try NWListener(using: NWParameters.tcp)
+            self.listener = listener
+            listener.newConnectionHandler = { [weak self] conn in
+                self?.handle(conn)
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self = self else { return }
+                if case .ready = state {
+                    let port = listener.port?.rawValue ?? 0
+                    let ip = wifiIPAddress() ?? "127.0.0.1"
+                    let url = "http://\(ip):\(port)/\(self.token)/"
+                    DispatchQueue.main.async {
+                        self.urlString = url
+                        self.running = true
+                    }
+                }
+                if case .failed = state {
+                    DispatchQueue.main.async { self.running = false }
+                }
+            }
+            listener.start(queue: queue)
+        } catch {
+            running = false
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.running = false
+            self?.urlString = ""
+        }
+    }
+
+    private func handle(_ conn: NWConnection) {
+        conn.start(queue: queue)
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, _, _ in
+            guard let self = self, let data = data, let req = String(data: data, encoding: .utf8) else {
+                conn.cancel()
+                return
+            }
+            self.respond(conn, request: req)
+        }
+    }
+
+    private func findItem(_ key: String) -> DownloadItem? {
+        for it in items { if it.key == key { return it } }
+        return nil
+    }
+
+    private func respond(_ conn: NWConnection, request: String) {
+        let lines = request.components(separatedBy: "\r\n")
+        let first = lines.first ?? ""
+        let parts = first.split(separator: " ")
+        let path = parts.count > 1 ? String(parts[1]) : "/"
+        var rangeHeader: String? = nil
+        for line in lines {
+            if line.lowercased().hasPrefix("range:") { rangeHeader = line }
+        }
+        let prefix = "/" + token
+        if !path.hasPrefix(prefix) {
+            sendSimple(conn, code: 403, text: "Forbidden")
+            return
+        }
+        let rest = String(path.dropFirst(prefix.count))
+        if rest.isEmpty || rest == "/" {
+            sendHTML(conn, indexHTML())
+            return
+        }
+        if rest.hasPrefix("/watch/") {
+            let key = String(rest.dropFirst(7))
+            if let item = findItem(key) {
+                sendHTML(conn, watchHTML(item))
+            } else {
+                sendSimple(conn, code: 404, text: "Not found")
+            }
+            return
+        }
+        if rest.hasPrefix("/file/") {
+            let key = String(rest.dropFirst(6))
+            if let item = findItem(key) {
+                sendFile(conn, item: item, rangeHeader: rangeHeader)
+            } else {
+                sendSimple(conn, code: 404, text: "Not found")
+            }
+            return
+        }
+        sendSimple(conn, code: 404, text: "Not found")
+    }
+
+    private func escapeHTML(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    private func indexHTML() -> String {
+        var rows = ""
+        for item in items {
+            rows += "<a class='card' href='/\(token)/watch/\(item.key)'>🎬 \(escapeHTML(item.displayTitle))</a>"
+        }
+        return "<!doctype html><html lang='ar' dir='rtl'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>شوفها — بث التلفزيون</title><style>body{background:#0B0614;color:#fff;font-family:sans-serif;padding:20px}h1{font-size:22px}.card{display:block;background:#1B1030;color:#fff;text-decoration:none;padding:16px;border-radius:12px;margin:10px 0;font-size:17px}</style></head><body><h1>📺 تنزيلات شوفها</h1><p>اختر عنواناً للمشاهدة على التلفزيون</p>\(rows)</body></html>"
+    }
+
+    private func watchHTML(_ item: DownloadItem) -> String {
+        "<!doctype html><html lang='ar' dir='rtl'><head><meta charset='utf-8'><title>\(escapeHTML(item.displayTitle))</title><style>body{background:#000;margin:0}video{width:100%;height:100vh}</style></head><body><video controls autoplay src='/\(token)/file/\(item.key)'></video></body></html>"
+    }
+
+    private func sendHTML(_ conn: NWConnection, _ html: String) {
+        let body = Data(html.utf8)
+        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        var payload = Data(headers.utf8)
+        payload.append(body)
+        conn.send(content: payload, completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    private func sendSimple(_ conn: NWConnection, code: Int, text: String) {
+        let body = Data(text.utf8)
+        let headers = "HTTP/1.1 \(code) \(text)\r\nContent-Type: text/plain\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        var payload = Data(headers.utf8)
+        payload.append(body)
+        conn.send(content: payload, completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    private func parseRange(_ header: String, size: Int64) -> (Int64, Int64)? {
+        guard let eq = header.firstIndex(of: "=") else { return nil }
+        let spec = header[header.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+        if spec.hasPrefix("-") {
+            if let n = Int64(spec.dropFirst()) { return (max(0, size - n), size - 1) }
+            return nil
+        }
+        let sides = spec.split(separator: "-")
+        guard let firstSide = sides.first, let start = Int64(firstSide) else { return nil }
+        var end = size - 1
+        if sides.count > 1, let e = Int64(sides[1]) { end = min(e, size - 1) }
+        if start < 0 || start >= size || end < start { return nil }
+        return (start, end)
+    }
+
+    private func sendFile(_ conn: NWConnection, item: DownloadItem, rangeHeader: String?) {
+        let fileURL = downloadsDir().appendingPathComponent(item.fileName)
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+            sendSimple(conn, code: 404, text: "Not found")
+            return
+        }
+        let size = item.bytes
+        var start: Int64 = 0
+        var end: Int64 = size - 1
+        var code = 200
+        if let rh = rangeHeader, let r = parseRange(rh, size: size) {
+            start = r.0
+            end = r.1
+            code = 206
+        }
+        let length = end - start + 1
+        var headers = "HTTP/1.1 \(code) \(code == 206 ? "Partial Content" : "OK")\r\n"
+        headers += "Content-Type: video/mp4\r\n"
+        headers += "Accept-Ranges: bytes\r\n"
+        headers += "Content-Length: \(length)\r\n"
+        if code == 206 { headers += "Content-Range: bytes \(start)-\(end)/\(size)\r\n" }
+        headers += "Connection: close\r\n\r\n"
+        conn.send(content: Data(headers.utf8), completion: .contentProcessed { [weak self] _ in
+            self?.stream(conn, handle: handle, offset: start, remaining: length)
+        })
+    }
+
+    private func stream(_ conn: NWConnection, handle: FileHandle, offset: Int64, remaining: Int64) {
+        if remaining <= 0 {
+            try? handle.close()
+            conn.cancel()
+            return
+        }
+        do {
+            try handle.seek(toOffset: UInt64(offset))
+            let chunk = handle.readData(ofLength: Int(min(remaining, 512 * 1024)))
+            if chunk.isEmpty {
+                try? handle.close()
+                conn.cancel()
+                return
+            }
+            conn.send(content: chunk, completion: .contentProcessed { [weak self] _ in
+                self?.stream(conn, handle: handle, offset: offset + Int64(chunk.count), remaining: remaining - Int64(chunk.count))
+            })
+        } catch {
+            conn.cancel()
+        }
+    }
+}
+
+struct TVCastView: View {
+    @EnvironmentObject var downloads: DownloadManager
+    @StateObject private var server = CastServer()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("شغّل البث من هنا، وافتح الرابط أو امسح الكود بمتصفح التلفزيون على نفس شبكة الواي فاي — تطلع لك تنزيلاتك وتشغّلها على الشاشة الكبيرة. البث يوقف من تطلع من هاي الصفحة.")
+                    .font(.system(size: 13.5)).foregroundColor(.white.opacity(0.78))
+                    .lineSpacing(5)
+                if downloads.items.isEmpty {
+                    Text("ما عندك تنزيلات بعد — حمّل أي عنوان أولاً")
+                        .font(.system(size: 13.5, weight: .semibold)).foregroundColor(.orange)
+                } else if server.running {
+                    VStack(spacing: 14) {
+                        if let img = qrImage(from: server.urlString) {
+                            Image(uiImage: img)
+                                .interpolation(.none)
+                                .resizable()
+                                .frame(width: 170, height: 170)
+                                .background(Color.white)
+                                .cornerRadius(12)
+                        }
+                        Text(server.urlString)
+                            .font(.system(size: 15, weight: .black)).foregroundColor(Color.brandCyan)
+                            .multilineTextAlignment(.center)
+                        Text("البث شغال الآن")
+                            .font(.system(size: 12)).foregroundColor(.gray)
+                        Button(action: { server.stop() }) {
+                            Text("إيقاف البث")
+                                .font(.system(size: 14, weight: .black)).foregroundColor(.white)
+                                .padding(.horizontal, 22).padding(.vertical, 11)
+                                .background(Color.red.opacity(0.4)).cornerRadius(12)
+                        }
+                        .buttonStyle(PressScaleStyle())
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    Button(action: { server.start(items: downloads.items) }) {
+                        HStack(spacing: 9) {
+                            Image(systemName: "tv.fill")
+                            Text("ابدأ البث للتلفزيون").font(.system(size: 15, weight: .black))
+                        }
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity).padding(.vertical, 14)
+                        .background(Color.brandGradient).cornerRadius(14)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                }
+                Spacer()
+            }
+            .padding(18)
+        }
+        .background(AmbienceBackground())
+        .navigationTitle("بث للتلفزيون")
+        .navigationBarTitleDisplayMode(.inline)
+        .onDisappear { server.stop() }
+    }
+}
+
+// MARK: - Cloud account (linked to ShofhaBot)
+
+extension Library {
+    func mergeCloud(favs cloudFavs: [SavedCard], progress cloudProgress: [ProgressItem], watched cloudWatched: [String]) {
+        var seen = Set<Int>()
+        var merged: [SavedCard] = []
+        for f in cloudFavs where !seen.contains(f.i) { seen.insert(f.i); merged.append(f) }
+        for f in favorites where !seen.contains(f.i) { seen.insert(f.i); merged.append(f) }
+        favorites = merged
+        saveJSON(favorites, key: "lib.favs")
+
+        var byId: [Int: ProgressItem] = [:]
+        for p in progress { byId[p.card.i] = p }
+        for p in cloudProgress {
+            if let old = byId[p.card.i] {
+                if p.updated > old.updated { byId[p.card.i] = p }
+            } else {
+                byId[p.card.i] = p
+            }
+        }
+        var mp = Array(byId.values)
+        mp.sort { $0.updated > $1.updated }
+        if mp.count > 24 { mp = Array(mp.prefix(24)) }
+        progress = mp
+        saveJSON(progress, key: "lib.progress")
+
+        watched.formUnion(cloudWatched)
+        saveJSON(Array(watched), key: "lib.watched")
+    }
+}
+
+struct CloudEnvelope: Encodable {
+    var token: String
+    var push: Bool
+    var favs: [SavedCard]
+    var progress: [ProgressItem]
+    var watched: [String]
+}
+
+enum CloudSync {
+    static let base = "https://shofhabot.vercel.app"
+
+    static var token: String? {
+        get { UserDefaults.standard.string(forKey: "lib.cloudToken") }
+        set { UserDefaults.standard.set(newValue, forKey: "lib.cloudToken") }
+    }
+
+    static func post(action: String, data: Data) async -> [String: Any]? {
+        guard let url = URL(string: base + "/api/bot?action=" + action) else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        do {
+            let (respData, _) = try await URLSession.shared.data(for: req)
+            let obj = try JSONSerialization.jsonObject(with: respData)
+            return obj as? [String: Any]
+        } catch {
+            return nil
+        }
+    }
+
+    static func link(code: String) async -> String? {
+        let body = ["code": code.trimmingCharacters(in: .whitespaces)]
+        guard let data = try? JSONSerialization.data(withJSONObject: body),
+              let dict = await post(action: "applink", data: data),
+              (dict["ok"] as? Bool) == true,
+              let tok = dict["token"] as? String, !tok.isEmpty else { return nil }
+        return tok
+    }
+
+    static func decodeList<T: Decodable>(_ dict: [String: Any], _ key: String, _ type: T.Type) -> T? {
+        guard let obj = dict[key],
+              let data = try? JSONSerialization.data(withJSONObject: obj) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    static func pull() async -> (favs: [SavedCard], progress: [ProgressItem], watched: [String])? {
+        guard let token = token else { return nil }
+        let body = ["token": token]
+        guard let data = try? JSONSerialization.data(withJSONObject: body),
+              let dict = await post(action: "appsync", data: data),
+              (dict["ok"] as? Bool) == true else { return nil }
+        let favs = decodeList(dict, "favs", [SavedCard].self) ?? []
+        let prog = decodeList(dict, "progress", [ProgressItem].self) ?? []
+        let watch = decodeList(dict, "watched", [String].self) ?? []
+        return (favs, prog, watch)
+    }
+
+    static func push(favs: [SavedCard], progress: [ProgressItem], watched: [String]) async -> Bool {
+        guard let token = token else { return false }
+        let env = CloudEnvelope(token: token, push: true, favs: favs, progress: progress, watched: watched)
+        guard let data = try? JSONEncoder().encode(env),
+              let dict = await post(action: "appsync", data: data) else { return false }
+        return (dict["ok"] as? Bool) == true
+    }
+}
+
+struct CloudView: View {
+    @EnvironmentObject var library: Library
+    @State private var code = ""
+    @State private var linked = CloudSync.token != nil
+    @State private var msg = ""
+    @State private var busy = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("اربط التطبيق ببوت شوفها على تيليجرام — وقائمتك وتقدّمك وعلامات «شاهدتها» تتزامن بين التطبيق والبوت، وتبقى محفوظة حتى لو حذفت التطبيق ونصّبته من جديد.")
+                    .font(.system(size: 13.5)).foregroundColor(.white.opacity(0.78))
+                    .lineSpacing(5)
+                if linked {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.system(size: 20))
+                        Text("الحساب مربوط ✓").font(.system(size: 15.5, weight: .black)).foregroundColor(.white)
+                    }
+                    Button(action: { Task { await doSync() } }) {
+                        Text(busy ? "جاري المزامنة..." : "مزامنة الآن")
+                            .font(.system(size: 15, weight: .black)).foregroundColor(.white)
+                            .frame(maxWidth: .infinity).padding(.vertical, 14)
+                            .background(Color.brandGradient).cornerRadius(14)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                    .disabled(busy)
+                    Button(action: {
+                        CloudSync.token = nil
+                        linked = false
+                        msg = "انقطع الربط من هذا الجهاز — بياناتك المحلية باقية مثل ما هي"
+                    }) {
+                        Text("قطع الربط")
+                            .font(.system(size: 13.5, weight: .bold)).foregroundColor(.red)
+                            .frame(maxWidth: .infinity).padding(.vertical, 12)
+                            .background(Color.red.opacity(0.12)).cornerRadius(12)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                } else {
+                    VStack(alignment: .leading, spacing: 9) {
+                        stepRow("1", "افتح بوت شوفها على تيليجرام: @ShofhaBot")
+                        stepRow("2", "من القائمة اضغط «📱 ربط التطبيق» — يوصلك كود من 6 أرقام")
+                        stepRow("3", "اكتب الكود هنا (صالح 10 دقايق)")
+                    }
+                    HStack(spacing: 10) {
+                        TextField("000000", text: $code)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.center)
+                            .font(.system(size: 20, weight: .black))
+                            .foregroundColor(.white)
+                            .padding(.vertical, 12)
+                            .background(Color.white.opacity(0.06)).cornerRadius(12)
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                        Button(action: { Task { await doLink() } }) {
+                            Text(busy ? "..." : "ربط")
+                                .font(.system(size: 15, weight: .black)).foregroundColor(.white)
+                                .padding(.horizontal, 26).padding(.vertical, 13)
+                                .background(Color.brandGradient).cornerRadius(12)
+                        }
+                        .buttonStyle(PressScaleStyle())
+                        .disabled(busy || code.count < 6)
+                    }
+                }
+                if !msg.isEmpty {
+                    Text(msg)
+                        .font(.system(size: 13, weight: .semibold)).foregroundColor(Color.brandCyan)
+                        .lineSpacing(4)
+                }
+                Spacer()
+            }
+            .padding(18)
+        }
+        .background(AmbienceBackground())
+        .navigationTitle("الحساب السحابي")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func stepRow(_ n: String, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(n)
+                .font(.system(size: 12, weight: .black)).foregroundColor(.white)
+                .frame(width: 22, height: 22)
+                .background(Color.brandGradient).clipShape(Circle())
+            Text(text).font(.system(size: 13.5)).foregroundColor(.white.opacity(0.85))
+            Spacer()
+        }
+    }
+
+    private func doLink() async {
+        busy = true
+        msg = ""
+        if let tok = await CloudSync.link(code: code) {
+            CloudSync.token = tok
+            linked = true
+            await doSync()
+        } else {
+            msg = "الكود غلط أو منتهي — سوِّ كوداً جديداً من البوت وحاول مرة ثانية"
+        }
+        busy = false
+    }
+
+    private func doSync() async {
+        busy = true
+        if let cloud = await CloudSync.pull() {
+            library.mergeCloud(favs: cloud.favs, progress: cloud.progress, watched: cloud.watched)
+            let ok = await CloudSync.push(favs: library.favorites, progress: library.progress, watched: Array(library.watched))
+            msg = ok ? "تمت المزامنة ✓ قائمتك وتقدّمك محفوظة بحسابك" : "وصلت بيانات حسابك وادمجت، بس الحفظ فشل — جرّب «مزامنة الآن» مرة ثانية"
+        } else {
+            msg = "فشلت المزامنة — تحقق من اتصالك وحاول مرة ثانية"
+        }
+        busy = false
+    }
+}
+
+// MARK: - Internet Archive gateway
+
+struct ArchiveDoc: Codable, Identifiable {
+    var identifier: String
+    var title: String?
+    var year: Int?
+    var downloads: Int?
+    var id: String { identifier }
+    var posterURL: String { "https://archive.org/services/img/\(identifier)" }
+    var displayTitle: String {
+        if let t = title, !t.isEmpty { return t }
+        return identifier
+    }
+}
+
+struct ArchiveSearchResponse: Codable {
+    struct Resp: Codable {
+        var docs: [ArchiveDoc]
+        var numFound: Int
+    }
+    var response: Resp
+}
+
+struct ArchiveMetadata: Codable {
+    struct FileEntry: Codable {
+        var name: String?
+        var format: String?
+    }
+    var files: [FileEntry]?
+}
+
+func archiveSearch(query: String, page: Int) async -> [ArchiveDoc] {
+    let q = query.trimmingCharacters(in: .whitespaces)
+    let base = q.isEmpty ? "mediatype:(movies)" : "\(q) AND mediatype:(movies)"
+    let enc = base.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? base
+    let urlStr = "https://archive.org/advancedsearch.php?q=\(enc)&fl[]=identifier&fl[]=title&fl[]=year&fl[]=downloads&rows=30&page=\(page)&output=json"
+    guard let url = URL(string: urlStr) else { return [] }
+    do {
+        let (data, _) = try await URLSession.shared.data(for: URLRequest(url: url))
+        let decoded = try JSONDecoder().decode(ArchiveSearchResponse.self, from: data)
+        return decoded.response.docs
+    } catch {
+        return []
+    }
+}
+
+func archiveMP4URL(identifier: String) async -> URL? {
+    guard let url = URL(string: "https://archive.org/metadata/\(identifier)") else { return nil }
+    do {
+        let (data, _) = try await URLSession.shared.data(for: URLRequest(url: url))
+        let meta = try JSONDecoder().decode(ArchiveMetadata.self, from: data)
+        var best: String? = nil
+        var bestScore = -1
+        for f in meta.files ?? [] {
+            guard let name = f.name else { continue }
+            let lower = name.lowercased()
+            if !lower.hasSuffix(".mp4") { continue }
+            var score = 10
+            if lower.contains("trailer") { score -= 8 }
+            if lower.contains("_ia") { score -= 3 }
+            if (f.format ?? "").contains("MPEG4") { score += 2 }
+            if score > bestScore {
+                bestScore = score
+                best = name
+            }
+        }
+        guard let file = best else { return nil }
+        let enc = file.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file
+        return URL(string: "https://archive.org/download/\(identifier)/\(enc)")
+    } catch {
+        return nil
+    }
+}
+
+struct ArchiveCard: View {
+    let doc: ArchiveDoc
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Color.clear
+                .aspectRatio(2/3, contentMode: .fit)
+                .overlay(PosterImage(url: doc.posterURL))
+                .cornerRadius(13)
+                .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.09), lineWidth: 1))
+            Text(doc.displayTitle)
+                .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.white)
+                .lineLimit(2)
+            HStack(spacing: 4) {
+                if let y = doc.year { Text(String(y)) }
+                Text("• أرشيفي")
+            }
+            .font(.system(size: 10)).foregroundColor(.gray)
+            .lineLimit(1)
+        }
+    }
+}
+
+struct ArchiveView: View {
+    @State private var query = ""
+    @State private var docs: [ArchiveDoc] = []
+    @State private var page = 1
+    @State private var loading = false
+    @State private var searched = false
+    @State private var canMore = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 15) {
+                HStack(spacing: 9) {
+                    Image(systemName: "magnifyingglass").foregroundColor(Color.brandCyan)
+                    TextField("ابحث ببوابة الأرشيف...", text: $query)
+                        .foregroundColor(.white)
+                        .submitLabel(.search)
+                        .onSubmit { Task { await runSearch(reset: true) } }
+                    if !query.isEmpty {
+                        Button(action: { query = "" }) {
+                            Image(systemName: "xmark.circle.fill").foregroundColor(.gray)
+                        }
+                    }
+                }
+                .padding(13)
+                .background(Color.white.opacity(0.06)).cornerRadius(14)
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                .padding(.horizontal, 16)
+
+                Text("أفلام تراثية وكلاسيكية من مكتبة أرشيف الإنترنت العالمية — محتوى بالنطاق العام، منفصل عن مكتبة شوفها.")
+                    .font(.system(size: 12)).foregroundColor(.gray)
+                    .padding(.horizontal, 16)
+                    .lineSpacing(4)
+
+                if loading && docs.isEmpty {
+                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .frame(maxWidth: .infinity).padding(.top, 40)
+                } else if docs.isEmpty && searched {
+                    Text("لا توجد نتائج — جرّب اسماً بالإنجليزية")
+                        .font(.system(size: 13.5)).foregroundColor(.gray)
+                        .frame(maxWidth: .infinity).padding(.top, 40)
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
+                        ForEach(docs) { doc in
+                            NavigationLink(destination: ArchiveDetailView(doc: doc)) {
+                                ArchiveCard(doc: doc)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    if canMore {
+                        Button(action: { Task { await runSearch(reset: false) } }) {
+                            Text(loading ? "جاري التحميل..." : "عرض المزيد")
+                                .font(.system(size: 14, weight: .black)).foregroundColor(.white)
+                                .frame(maxWidth: .infinity).padding(.vertical, 13)
+                                .background(Color.white.opacity(0.07)).cornerRadius(13)
+                        }
+                        .buttonStyle(PressScaleStyle())
+                        .padding(.horizontal, 16)
+                        .disabled(loading)
+                    }
+                }
+            }
+            .padding(.top, 10)
+            .padding(.bottom, 24)
+        }
+        .background(AmbienceBackground())
+        .navigationTitle("🌌 بوابة الأرشيف")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            if docs.isEmpty { await runSearch(reset: true) }
+        }
+    }
+
+    private func runSearch(reset: Bool) async {
+        if reset {
+            page = 1
+            docs = []
+        }
+        loading = true
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let effective = q.isEmpty ? "feature film" : q
+        let results = await archiveSearch(query: effective, page: page)
+        docs.append(contentsOf: results)
+        canMore = results.count == 30
+        searched = true
+        loading = false
+        page += 1
+    }
+}
+
+struct ArchiveDetailView: View {
+    let doc: ArchiveDoc
+    @State private var player: AVPlayer?
+    @State private var state = 0
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if state == 1, let player = player {
+                    VideoPlayer(player: player)
+                        .aspectRatio(16/9, contentMode: .fit)
+                        .cornerRadius(13)
+                } else if state == 2 {
+                    VStack(spacing: 10) {
+                        Text("🎞").font(.system(size: 34))
+                        Text("هذا العنصر بلا ملف فيديو مباشر قابل للتشغيل")
+                            .font(.system(size: 13.5)).foregroundColor(.gray)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 40)
+                } else {
+                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .frame(maxWidth: .infinity).padding(.vertical, 50)
+                }
+                HStack(alignment: .top, spacing: 14) {
+                    PosterImage(url: doc.posterURL)
+                        .frame(width: 92, height: 138)
+                        .cornerRadius(11)
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(doc.displayTitle)
+                            .font(.system(size: 17, weight: .black)).foregroundColor(.white)
+                        HStack(spacing: 6) {
+                            if let y = doc.year {
+                                Text(String(y))
+                                    .font(.system(size: 11, weight: .bold)).foregroundColor(.white)
+                                    .padding(.horizontal, 9).padding(.vertical, 4.5)
+                                    .background(Color.white.opacity(0.08)).cornerRadius(9)
+                            }
+                            Text("أرشيفي / تراثي")
+                                .font(.system(size: 11, weight: .bold)).foregroundColor(Color.brandCyan)
+                                .padding(.horizontal, 9).padding(.vertical, 4.5)
+                                .background(Color.brandCyan.opacity(0.12)).cornerRadius(9)
+                        }
+                        if let d = doc.downloads {
+                            Text("تم تنزيله \(d) مرة من الأرشيف")
+                                .font(.system(size: 11.5)).foregroundColor(.gray)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .padding(.top, 12)
+        }
+        .background(AmbienceBackground())
+        .navigationTitle("بوابة الأرشيف")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            if let url = await archiveMP4URL(identifier: doc.identifier) {
+                player = AVPlayer(url: url)
+                state = 1
+                player?.play()
+            } else {
+                state = 2
+            }
         }
         .onDisappear {
             player?.pause()
@@ -2274,6 +3255,7 @@ struct DetailView: View {
     @EnvironmentObject var store: AppStore
     @EnvironmentObject var library: Library
     @EnvironmentObject var downloads: DownloadManager
+    @EnvironmentObject var floating: FloatingSession
     @State private var detail: Detail?
     @State private var season: Int = 0
     @State private var episode: Episode? = nil
@@ -2498,13 +3480,15 @@ struct DetailView: View {
     private func serverButtons(servers: [Server], defaultURL: String?, title: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if let first = servers.first {
-                NavigationLink(destination: PlayerView(title: title, servers: servers,
-                                                       initialURL: defaultURL ?? first.url,
-                                                       card: card,
-                                                       seasonNum: episode != nil ? season : nil,
-                                                       episodeNum: episode?.n,
-                                                       seasonEpisodes: episode != nil ? (detail?.seasons[String(season)] ?? []) : [],
-                                                       seriesName: card.t.isEmpty ? card.l : card.t)) {
+                Button(action: {
+                    floating.start(title: title, servers: servers,
+                                   initialURL: defaultURL ?? first.url,
+                                   card: card,
+                                   seasonNum: episode != nil ? season : nil,
+                                   episodeNum: episode?.n,
+                                   seasonEpisodes: episode != nil ? (detail?.seasons[String(season)] ?? []) : [],
+                                   seriesName: card.t.isEmpty ? card.l : card.t)
+                }) {
                     HStack(spacing: 10) {
                         ZStack {
                             Circle().fill(Color.white)
@@ -2537,6 +3521,7 @@ struct PlayerView: View {
     let episodeNum: Int?
     let seasonEpisodes: [Episode]
     let seriesName: String
+    let onURLChange: ((String) -> Void)?
     @EnvironmentObject var library: Library
     @State private var idx: Int
     @State private var phase = 0
@@ -2547,7 +3532,8 @@ struct PlayerView: View {
 
     init(title: String, servers: [Server], initialURL: String,
          card: Card? = nil, seasonNum: Int? = nil, episodeNum: Int? = nil,
-         seasonEpisodes: [Episode] = [], seriesName: String = "") {
+         seasonEpisodes: [Episode] = [], seriesName: String = "",
+         onURLChange: ((String) -> Void)? = nil) {
         self.title = title
         self.servers = servers
         self.card = card
@@ -2555,6 +3541,7 @@ struct PlayerView: View {
         self.episodeNum = episodeNum
         self.seasonEpisodes = seasonEpisodes
         self.seriesName = seriesName
+        self.onURLChange = onURLChange
         var start = 0
         for i in servers.indices {
             if cleanURL(servers[i].url) == cleanURL(initialURL) {
@@ -2722,6 +3709,138 @@ struct PlayerView: View {
         .background(AmbienceBackground())
         .navigationTitle(curTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { onURLChange?(currentURL) }
+        .onChange(of: idx) { _ in onURLChange?(currentURL) }
+        .onChange(of: epPos) { _ in onURLChange?(currentURL) }
+    }
+}
+
+// MARK: - Floating player
+
+final class FloatingSession: ObservableObject {
+    @Published var active = false
+    @Published var minimized = false
+    var title: String = ""
+    var servers: [Server] = []
+    var initialURL: String = ""
+    var currentURL: String = ""
+    var card: Card? = nil
+    var seasonNum: Int? = nil
+    var episodeNum: Int? = nil
+    var seasonEpisodes: [Episode] = []
+    var seriesName: String = ""
+
+    func start(title: String, servers: [Server], initialURL: String, card: Card?,
+               seasonNum: Int?, episodeNum: Int?, seasonEpisodes: [Episode], seriesName: String) {
+        self.title = title
+        self.servers = servers
+        self.initialURL = initialURL
+        self.currentURL = initialURL
+        self.card = card
+        self.seasonNum = seasonNum
+        self.episodeNum = episodeNum
+        self.seasonEpisodes = seasonEpisodes
+        self.seriesName = seriesName
+        minimized = false
+        active = true
+    }
+
+    func end() {
+        active = false
+        minimized = false
+    }
+}
+
+struct FloatingPlayerHost: View {
+    @EnvironmentObject var session: FloatingSession
+
+    private var startURL: String {
+        session.currentURL.isEmpty ? session.initialURL : session.currentURL
+    }
+
+    var body: some View {
+        if session.minimized {
+            miniView
+        } else {
+            fullView
+        }
+    }
+
+    private var fullView: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(session.title)
+                    .font(.system(size: 13.5, weight: .bold)).foregroundColor(.white)
+                    .lineLimit(1)
+                Spacer()
+                Button(action: { session.minimized = true }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.down").font(.system(size: 11, weight: .black))
+                        Text("تصغير").font(.system(size: 12, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12)).cornerRadius(10)
+                }
+                .buttonStyle(PressScaleStyle())
+                Button(action: { session.end() }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "xmark").font(.system(size: 11, weight: .black))
+                        Text("إغلاق").font(.system(size: 12, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(Color.red.opacity(0.35)).cornerRadius(10)
+                }
+                .buttonStyle(PressScaleStyle())
+            }
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background(Color.black)
+            PlayerView(title: session.title, servers: session.servers,
+                       initialURL: startURL,
+                       card: session.card,
+                       seasonNum: session.seasonNum,
+                       episodeNum: session.episodeNum,
+                       seasonEpisodes: session.seasonEpisodes,
+                       seriesName: session.seriesName,
+                       onURLChange: { url in session.currentURL = url })
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+        .ignoresSafeArea()
+    }
+
+    private var miniView: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                ZStack(alignment: .topTrailing) {
+                    PlayerWebView(url: cleanURL(session.currentURL), onSuccess: {}, onFailure: {})
+                        .frame(width: 188, height: 106)
+                        .cornerRadius(12)
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.25), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.6), radius: 12, y: 5)
+                    HStack(spacing: 6) {
+                        Button(action: { session.minimized = false }) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .black)).foregroundColor(.white)
+                                .padding(7)
+                                .background(Color.black.opacity(0.6)).clipShape(Circle())
+                        }
+                        Button(action: { session.end() }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .black)).foregroundColor(.white)
+                                .padding(7)
+                                .background(Color.black.opacity(0.6)).clipShape(Circle())
+                        }
+                    }
+                    .padding(6)
+                }
+            }
+            .padding(.trailing, 12)
+            .padding(.bottom, 58)
+        }
     }
 }
 
