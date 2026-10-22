@@ -939,7 +939,6 @@ struct PosterImage: View {
     @State private var image: UIImage?
     @State private var failed = false
     @State private var loading = false
-    @State private var showDiag = false
 
     var body: some View {
         ZStack {
@@ -963,20 +962,6 @@ struct PosterImage: View {
         .clipped()
         .task(id: url) { await load() }
         .onAppear { Task { await load() } }
-        .onLongPressGesture {
-            if failed { showDiag = true }
-        }
-        .alert("تشخيص البوستر", isPresented: $showDiag) {
-            Button("تمام", role: .cancel) {}
-        } message: {
-            Text(diagText)
-        }
-    }
-
-    private var diagText: String {
-        let host = URL(string: url)?.host ?? "مصدر غير معروف"
-        let err = ImageLoader.lastError(for: url) ?? "سبب غير معروف"
-        return "المصدر: \(host)\nالسبب: \(err)"
     }
 
     private func load() async {
