@@ -385,6 +385,23 @@ final class Library: ObservableObject {
     }
 }
 
+func workKey(_ c: Card) -> String {
+    let name = (c.t.isEmpty ? c.l : c.t).lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    return "\(name)|\(c.y ?? 0)|\(c.dub ? 1 : 0)|\(c.k)"
+}
+
+func dedupeByWork(_ cards: [Card]) -> [Card] {
+    var seen = Set<String>()
+    var out: [Card] = []
+    for c in cards {
+        let k = workKey(c)
+        if seen.contains(k) { continue }
+        seen.insert(k)
+        out.append(c)
+    }
+    return out
+}
+
 func recommendations(library: Library, pool: [Card]) -> [Card] {
     var genreScore: [String: Int] = [:]
     var excluded = Set<Int>()
@@ -411,7 +428,7 @@ func recommendations(library: Library, pool: [Card]) -> [Card] {
     scored.sort { $0.1 > $1.1 }
     var out: [Card] = []
     for item in scored.prefix(20) { out.append(item.0) }
-    return out
+    return dedupeByWork(out)
 }
 
 // MARK: - Offline downloads
@@ -1096,7 +1113,7 @@ struct CardRowView: View {
             SectionHeader(title: title)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 12) {
-                    ForEach(cards) { card in
+                    ForEach(dedupeByWork(cards)) { card in
                         NavigationLink(destination: DetailView(card: card)) {
                             CardCell(card: card).frame(width: 110)
                         }
@@ -1114,7 +1131,7 @@ struct GridView: View {
     @State private var shown = 90
     private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
     var body: some View {
-        let page = Array(cards.prefix(shown))
+        let page = Array(dedupeByWork(cards).prefix(shown))
         LazyVGrid(columns: cols, spacing: 17) {
             ForEach(page) { card in
                 NavigationLink(destination: DetailView(card: card)) {
@@ -1279,7 +1296,7 @@ struct HomeView: View {
                             SectionHeader(title: "▶️ تابع المشاهدة")
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(alignment: .top, spacing: 12) {
-                                    ForEach(library.progress) { item in
+                                    ForEach(progressDeduped) { item in
                                         NavigationLink(destination: DetailView(card: item.card.card, startSeason: item.season, startEpisode: item.episode)) {
                                             VStack(alignment: .leading, spacing: 5) {
                                                 CardCell(card: item.card.card).frame(width: 110)
@@ -1379,28 +1396,6 @@ struct HomeView: View {
                         }
                     }
 
-                    NavigationLink(destination: ArchiveView()) {
-                        HStack(spacing: 12) {
-                            Text("🌌").font(.system(size: 27))
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("بوابة الأرشيف")
-                                    .font(.system(size: 16, weight: .black)).foregroundColor(.white)
-                                Text("آلاف الأفلام التراثية والكلاسيكية من مكتبة أرشيف الإنترنت العالمية")
-                                    .font(.system(size: 11.5)).foregroundColor(.white.opacity(0.75))
-                                    .lineLimit(2)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 13, weight: .bold)).foregroundColor(.white.opacity(0.7))
-                        }
-                        .padding(15)
-                        .background(LinearGradient(colors: [Color(hex: "1B2A52"), Color(hex: "0E3A45")], startPoint: .leading, endPoint: .trailing))
-                        .cornerRadius(15)
-                        .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.white.opacity(0.12), lineWidth: 1))
-                    }
-                    .buttonStyle(PressScaleStyle())
-                    .padding(.horizontal, 16)
-
                     Link(destination: URL(string: "https://t.me/shofha10")!) {
                         HStack(spacing: 9) {
                             Image(systemName: "paperplane.fill")
@@ -1430,6 +1425,18 @@ struct HomeView: View {
         .onChange(of: library.favorites.count) { _ in recomputeRails() }
         .onChange(of: library.progress.count) { _ in recomputeRails() }
         .onChange(of: library.watched.count) { _ in recomputeRails() }
+    }
+
+    private var progressDeduped: [ProgressItem] {
+        var seen = Set<String>()
+        var out: [ProgressItem] = []
+        for item in library.progress {
+            let k = workKey(item.card.card)
+            if seen.contains(k) { continue }
+            seen.insert(k)
+            out.append(item)
+        }
+        return out
     }
 
     private func recomputeRails() {
@@ -1479,7 +1486,7 @@ struct HeroPager: View {
     @State private var page = 0
 
     var body: some View {
-        let top = Array(cards.prefix(8))
+        let top = Array(dedupeByWork(cards).prefix(8))
         ZStack(alignment: .bottom) {
             TabView(selection: $page) {
                 ForEach(top.indices, id: \.self) { idx in
@@ -2989,263 +2996,6 @@ struct CloudView: View {
     }
 }
 
-// MARK: - Internet Archive gateway
-
-struct ArchiveDoc: Codable, Identifiable {
-    var identifier: String
-    var title: String?
-    var year: Int?
-    var downloads: Int?
-    var id: String { identifier }
-    var posterURL: String { "https://archive.org/services/img/\(identifier)" }
-    var displayTitle: String {
-        if let t = title, !t.isEmpty { return t }
-        return identifier
-    }
-}
-
-struct ArchiveSearchResponse: Codable {
-    struct Resp: Codable {
-        var docs: [ArchiveDoc]
-        var numFound: Int
-    }
-    var response: Resp
-}
-
-struct ArchiveMetadata: Codable {
-    struct FileEntry: Codable {
-        var name: String?
-        var format: String?
-    }
-    var files: [FileEntry]?
-}
-
-func archiveSearch(query: String, page: Int) async -> [ArchiveDoc] {
-    let q = query.trimmingCharacters(in: .whitespaces)
-    let base = q.isEmpty ? "mediatype:(movies)" : "\(q) AND mediatype:(movies)"
-    let enc = base.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? base
-    let urlStr = "https://archive.org/advancedsearch.php?q=\(enc)&fl[]=identifier&fl[]=title&fl[]=year&fl[]=downloads&rows=30&page=\(page)&output=json"
-    guard let url = URL(string: urlStr) else { return [] }
-    do {
-        let (data, _) = try await URLSession.shared.data(for: URLRequest(url: url))
-        let decoded = try JSONDecoder().decode(ArchiveSearchResponse.self, from: data)
-        return decoded.response.docs
-    } catch {
-        return []
-    }
-}
-
-func archiveMP4URL(identifier: String) async -> URL? {
-    guard let url = URL(string: "https://archive.org/metadata/\(identifier)") else { return nil }
-    do {
-        let (data, _) = try await URLSession.shared.data(for: URLRequest(url: url))
-        let meta = try JSONDecoder().decode(ArchiveMetadata.self, from: data)
-        var best: String? = nil
-        var bestScore = -1
-        for f in meta.files ?? [] {
-            guard let name = f.name else { continue }
-            let lower = name.lowercased()
-            if !lower.hasSuffix(".mp4") { continue }
-            var score = 10
-            if lower.contains("trailer") { score -= 8 }
-            if lower.contains("_ia") { score -= 3 }
-            if (f.format ?? "").contains("MPEG4") { score += 2 }
-            if score > bestScore {
-                bestScore = score
-                best = name
-            }
-        }
-        guard let file = best else { return nil }
-        let enc = file.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file
-        return URL(string: "https://archive.org/download/\(identifier)/\(enc)")
-    } catch {
-        return nil
-    }
-}
-
-struct ArchiveCard: View {
-    let doc: ArchiveDoc
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Color.clear
-                .aspectRatio(2/3, contentMode: .fit)
-                .overlay(PosterImage(url: doc.posterURL))
-                .cornerRadius(13)
-                .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.09), lineWidth: 1))
-            Text(doc.displayTitle)
-                .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.white)
-                .lineLimit(2)
-            HStack(spacing: 4) {
-                if let y = doc.year { Text(String(y)) }
-                Text("• أرشيفي")
-            }
-            .font(.system(size: 10)).foregroundColor(.gray)
-            .lineLimit(1)
-        }
-    }
-}
-
-struct ArchiveView: View {
-    @State private var query = ""
-    @State private var docs: [ArchiveDoc] = []
-    @State private var page = 1
-    @State private var loading = false
-    @State private var searched = false
-    @State private var canMore = false
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 15) {
-                HStack(spacing: 9) {
-                    Image(systemName: "magnifyingglass").foregroundColor(Color.brandCyan)
-                    TextField("ابحث ببوابة الأرشيف...", text: $query)
-                        .foregroundColor(.white)
-                        .submitLabel(.search)
-                        .onSubmit { Task { await runSearch(reset: true) } }
-                    if !query.isEmpty {
-                        Button(action: { query = "" }) {
-                            Image(systemName: "xmark.circle.fill").foregroundColor(.gray)
-                        }
-                    }
-                }
-                .padding(13)
-                .background(Color.white.opacity(0.06)).cornerRadius(14)
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.1), lineWidth: 1))
-                .padding(.horizontal, 16)
-
-                Text("أفلام تراثية وكلاسيكية من مكتبة أرشيف الإنترنت العالمية — محتوى بالنطاق العام، منفصل عن مكتبة شوفها.")
-                    .font(.system(size: 12)).foregroundColor(.gray)
-                    .padding(.horizontal, 16)
-                    .lineSpacing(4)
-
-                if loading && docs.isEmpty {
-                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        .frame(maxWidth: .infinity).padding(.top, 40)
-                } else if docs.isEmpty && searched {
-                    Text("لا توجد نتائج — جرّب اسماً بالإنجليزية")
-                        .font(.system(size: 13.5)).foregroundColor(.gray)
-                        .frame(maxWidth: .infinity).padding(.top, 40)
-                } else {
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
-                        ForEach(docs) { doc in
-                            NavigationLink(destination: ArchiveDetailView(doc: doc)) {
-                                ArchiveCard(doc: doc)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    if canMore {
-                        Button(action: { Task { await runSearch(reset: false) } }) {
-                            Text(loading ? "جاري التحميل..." : "عرض المزيد")
-                                .font(.system(size: 14, weight: .black)).foregroundColor(.white)
-                                .frame(maxWidth: .infinity).padding(.vertical, 13)
-                                .background(Color.white.opacity(0.07)).cornerRadius(13)
-                        }
-                        .buttonStyle(PressScaleStyle())
-                        .padding(.horizontal, 16)
-                        .disabled(loading)
-                    }
-                }
-            }
-            .padding(.top, 10)
-            .padding(.bottom, 24)
-        }
-        .background(AmbienceBackground())
-        .navigationTitle("🌌 بوابة الأرشيف")
-        .navigationBarTitleDisplayMode(.inline)
-        .task {
-            if docs.isEmpty { await runSearch(reset: true) }
-        }
-    }
-
-    private func runSearch(reset: Bool) async {
-        if reset {
-            page = 1
-            docs = []
-        }
-        loading = true
-        let q = query.trimmingCharacters(in: .whitespaces)
-        let effective = q.isEmpty ? "feature film" : q
-        let results = await archiveSearch(query: effective, page: page)
-        docs.append(contentsOf: results)
-        canMore = results.count == 30
-        searched = true
-        loading = false
-        page += 1
-    }
-}
-
-struct ArchiveDetailView: View {
-    let doc: ArchiveDoc
-    @State private var player: AVPlayer?
-    @State private var state = 0
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if state == 1, let player = player {
-                    VideoPlayer(player: player)
-                        .aspectRatio(16/9, contentMode: .fit)
-                        .cornerRadius(13)
-                } else if state == 2 {
-                    VStack(spacing: 10) {
-                        Text("🎞").font(.system(size: 34))
-                        Text("هذا العنصر بلا ملف فيديو مباشر قابل للتشغيل")
-                            .font(.system(size: 13.5)).foregroundColor(.gray)
-                    }
-                    .frame(maxWidth: .infinity).padding(.vertical, 40)
-                } else {
-                    ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        .frame(maxWidth: .infinity).padding(.vertical, 50)
-                }
-                HStack(alignment: .top, spacing: 14) {
-                    PosterImage(url: doc.posterURL)
-                        .frame(width: 92, height: 138)
-                        .cornerRadius(11)
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(doc.displayTitle)
-                            .font(.system(size: 17, weight: .black)).foregroundColor(.white)
-                        HStack(spacing: 6) {
-                            if let y = doc.year {
-                                Text(String(y))
-                                    .font(.system(size: 11, weight: .bold)).foregroundColor(.white)
-                                    .padding(.horizontal, 9).padding(.vertical, 4.5)
-                                    .background(Color.white.opacity(0.08)).cornerRadius(9)
-                            }
-                            Text("أرشيفي / تراثي")
-                                .font(.system(size: 11, weight: .bold)).foregroundColor(Color.brandCyan)
-                                .padding(.horizontal, 9).padding(.vertical, 4.5)
-                                .background(Color.brandCyan.opacity(0.12)).cornerRadius(9)
-                        }
-                        if let d = doc.downloads {
-                            Text("تم تنزيله \(d) مرة من الأرشيف")
-                                .font(.system(size: 11.5)).foregroundColor(.gray)
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-            }
-            .padding(.top, 12)
-        }
-        .background(AmbienceBackground())
-        .navigationTitle("بوابة الأرشيف")
-        .navigationBarTitleDisplayMode(.inline)
-        .task {
-            if let url = await archiveMP4URL(identifier: doc.identifier) {
-                player = AVPlayer(url: url)
-                state = 1
-                player?.play()
-            } else {
-                state = 2
-            }
-        }
-        .onDisappear {
-            player?.pause()
-        }
-    }
-}
-
 // MARK: - Detail
 
 struct DetailView: View {
@@ -3280,6 +3030,7 @@ struct DetailView: View {
                         .frame(maxWidth: .infinity).padding(.top, 30)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 26)
         }
         .background(AccentAmbience(accent: accent))
@@ -3304,80 +3055,86 @@ struct DetailView: View {
     }
 
     private var header: some View {
-        ZStack(alignment: .bottomLeading) {
-            PosterImage(url: card.p)
-                .frame(maxWidth: .infinity)
-                .frame(height: 350)
-                .blur(radius: 26)
-                .opacity(0.5)
-                .clipped()
-            if let accent = accent {
-                Rectangle().fill(accent).opacity(0.22)
-                    .frame(height: 350)
-            }
-            LinearGradient(colors: [.clear, Color.brandBg], startPoint: .top, endPoint: .bottom)
-            HStack(alignment: .bottom, spacing: 15) {
+        VStack(spacing: 0) {
+            ZStack(alignment: .bottom) {
                 PosterImage(url: card.p)
-                    .frame(width: 112, height: 168)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 300)
+                    .blur(radius: 24)
+                    .opacity(0.45)
+                    .clipped()
+                if let accent = accent {
+                    Rectangle().fill(accent).opacity(0.20)
+                        .frame(height: 300)
+                }
+                LinearGradient(colors: [.clear, Color.brandBg], startPoint: .top, endPoint: .bottom)
+                PosterImage(url: card.p)
+                    .frame(width: 118, height: 177)
                     .cornerRadius(13)
                     .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.16), lineWidth: 1))
                     .shadow(color: .black.opacity(0.55), radius: 16, y: 8)
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(card.t.isEmpty ? card.l : card.t)
-                        .font(.system(size: 21, weight: .black)).foregroundColor(.white)
-                        .lineLimit(3)
-                        .shadow(color: .black.opacity(0.6), radius: 8, y: 2)
-                    if !card.l.isEmpty && card.l != card.t {
-                        Text(card.l).font(.system(size: 12)).foregroundColor(.white.opacity(0.65)).lineLimit(1)
+                    .padding(.bottom, 14)
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button(action: { library.toggleFav(card) }) {
+                            Image(systemName: library.isFav(card.i) ? "heart.fill" : "heart")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(library.isFav(card.i) ? Color.red : Color.white)
+                                .frame(width: 38, height: 38)
+                                .background(Color.black.opacity(0.45))
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                                .overlay(Circle().stroke(Color.white.opacity(0.15), lineWidth: 1))
+                        }
+                        .buttonStyle(PressScaleStyle())
                     }
+                    Spacer()
+                }
+                .padding(14)
+            }
+            .frame(height: 300)
+            .clipped()
+
+            VStack(spacing: 8) {
+                Text(card.t.isEmpty ? card.l : card.t)
+                    .font(.system(size: 21, weight: .black)).foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .padding(.horizontal, 20)
+                if !card.l.isEmpty && card.l != card.t {
+                    Text(card.l)
+                        .font(.system(size: 12.5)).foregroundColor(.white.opacity(0.65))
+                        .multilineTextAlignment(.center).lineLimit(2)
+                        .padding(.horizontal, 20)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         metaChip(card.kindName)
                         if let y = card.y { metaChip(String(y)) }
                         if let r = card.r { metaChip("⭐ \(String(format: "%.1f", r))") }
                         if card.dub { metaChip("مدبلج") }
                         if !card.q.isEmpty { metaChip(card.q) }
-                    }
-                    if card.isSeriesLike {
-                        HStack(spacing: 6) {
+                        if card.isSeriesLike {
                             if let sc = card.sc { metaChip("\(sc) موسم") }
                             if let e = card.e { metaChip("\(e) حلقة") }
                         }
-                    }
-                    if let det = detail {
-                        HStack(spacing: 6) {
+                        if let det = detail {
                             if !det.country.isEmpty { metaChip(det.country) }
                             if let dur = det.dur { metaChip("\(dur) دقيقة") }
                         }
                     }
-                    if !card.g.isEmpty {
-                        Text(card.g.joined(separator: " • "))
-                            .font(.system(size: 11.5, weight: .semibold)).foregroundColor(Color.brandCyan).lineLimit(2)
-                    }
+                    .padding(.horizontal, 16)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(16)
-            VStack {
-                HStack {
-                    Spacer()
-                    Button(action: { library.toggleFav(card) }) {
-                        Image(systemName: library.isFav(card.i) ? "heart.fill" : "heart")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(library.isFav(card.i) ? Color.red : Color.white)
-                            .frame(width: 38, height: 38)
-                            .background(Color.black.opacity(0.45))
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.white.opacity(0.15), lineWidth: 1))
-                    }
-                    .buttonStyle(PressScaleStyle())
+                if !card.g.isEmpty {
+                    Text(card.g.joined(separator: " • "))
+                        .font(.system(size: 11.5, weight: .semibold)).foregroundColor(Color.brandCyan)
+                        .multilineTextAlignment(.center).lineLimit(2)
+                        .padding(.horizontal, 20)
                 }
-                Spacer()
             }
-            .padding(14)
+            .padding(.top, 12)
         }
-        .frame(height: 350)
-        .clipped()
     }
 
     private func metaChip(_ text: String) -> some View {
