@@ -948,7 +948,6 @@ struct PosterImage: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
-                    .transition(.opacity)
             } else if failed {
                 Image(systemName: "film")
                     .font(.system(size: 20))
@@ -975,7 +974,7 @@ struct PosterImage: View {
         let img = await ImageLoader.load(url)
         loading = false
         if let img = img {
-            withAnimation(.easeIn(duration: 0.25)) { image = img }
+            image = img
         } else {
             failed = true
         }
@@ -1111,13 +1110,13 @@ struct GridView: View {
     var body: some View {
         let page = Array(cards.prefix(shown))
         LazyVGrid(columns: cols, spacing: 17) {
-            ForEach(page.indices, id: \.self) { idx in
-                NavigationLink(destination: DetailView(card: page[idx])) {
-                    CardCell(card: page[idx])
+            ForEach(page) { card in
+                NavigationLink(destination: DetailView(card: card)) {
+                    CardCell(card: card)
                 }
                 .buttonStyle(.plain)
                 .onAppear {
-                    if idx >= shown - 12 && shown < cards.count { shown += 90 }
+                    if card.i == page.last?.i && shown < cards.count { shown += 90 }
                 }
             }
         }
@@ -1253,6 +1252,8 @@ struct ContentView: View {
 struct HomeView: View {
     @EnvironmentObject var store: AppStore
     @EnvironmentObject var library: Library
+    @State private var fresh: [Card] = []
+    @State private var forYou: [Card] = []
 
     var body: some View {
         ScrollView {
@@ -1288,12 +1289,12 @@ struct HomeView: View {
                         }
                     }
 
-                    if !freshCards(home).isEmpty {
-                        CardRowView(title: "🆕 نزل من آخر زيارة", cards: freshCards(home))
+                    if !fresh.isEmpty {
+                        CardRowView(title: "🆕 نزل من آخر زيارة", cards: fresh)
                     }
 
-                    if !recommendations(library: library, pool: recPool(home)).isEmpty {
-                        CardRowView(title: "✨ مختارات لك", cards: recommendations(library: library, pool: recPool(home)))
+                    if !forYou.isEmpty {
+                        CardRowView(title: "✨ مختارات لك", cards: forYou)
                     }
 
                     CardRowView(title: "🔥 ترند شوفها اليوم", cards: home.trend)
@@ -1388,7 +1389,18 @@ struct HomeView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             if let h = store.home { library.noteSeen(home: h) }
+            recomputeRails()
         }
+        .onChange(of: store.indexReady) { _ in recomputeRails() }
+        .onChange(of: library.favorites.count) { _ in recomputeRails() }
+        .onChange(of: library.progress.count) { _ in recomputeRails() }
+        .onChange(of: library.watched.count) { _ in recomputeRails() }
+    }
+
+    private func recomputeRails() {
+        guard let home = store.home else { return }
+        fresh = freshCards(home)
+        forYou = recommendations(library: library, pool: recPool(home))
     }
 
     private func recPool(_ home: HomeData) -> [Card] {
@@ -2164,9 +2176,11 @@ struct DetailView: View {
     private var header: some View {
         ZStack(alignment: .bottomLeading) {
             PosterImage(url: card.p)
+                .frame(maxWidth: .infinity)
                 .frame(height: 350)
                 .blur(radius: 26)
                 .opacity(0.5)
+                .clipped()
             if let accent = accent {
                 Rectangle().fill(accent).opacity(0.22)
                     .frame(height: 350)
@@ -2210,6 +2224,7 @@ struct DetailView: View {
                             .font(.system(size: 11.5, weight: .semibold)).foregroundColor(Color.brandCyan).lineLimit(2)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(16)
             VStack {
@@ -2232,6 +2247,7 @@ struct DetailView: View {
             .padding(14)
         }
         .frame(height: 350)
+        .clipped()
     }
 
     private func metaChip(_ text: String) -> some View {
@@ -2276,6 +2292,7 @@ struct DetailView: View {
                 let eps = det.seasons[String(season)] ?? []
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10),
                                     GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                    // episodes for the selected season
                     ForEach(eps) { ep in
                         Button(action: { episode = ep }) {
                             Text(library.isWatchedEp(card.i, season, ep.n) ? "\(ep.n) ✓" : "\(ep.n)")
@@ -2295,6 +2312,7 @@ struct DetailView: View {
                         }
                     }
                 }
+                .id(season)
                 .padding(.horizontal, 16)
 
                 if let ep = episode {
