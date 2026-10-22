@@ -2,6 +2,7 @@ import SwiftUI
 import WebKit
 import ImageIO
 import UIKit
+import AVKit
 
 // MARK: - Theme
 
@@ -378,6 +379,285 @@ final class Library: ObservableObject {
         var n = 0
         for k in watched { if k.hasPrefix(prefix) { n += 1 } }
         return n
+    }
+}
+
+// MARK: - Offline downloads
+
+let safariUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+
+func pickDownloadServer(_ servers: [Server]) -> (Server, String)? {
+    let prefs: [(String, String)] = [("dood", "dood"), ("d0o0d", "dood"),
+                                     ("streamtape", "streamtape"), ("filemoon", "filemoon"),
+                                     ("mixdrop", "mixdrop"), ("voe", "voe")]
+    for (token, kind) in prefs {
+        for s in servers {
+            let hay = (s.label + " " + s.url).lowercased()
+            if hay.contains(token) { return (s, kind) }
+        }
+    }
+    return nil
+}
+
+func regexFirst(_ pattern: String, in text: String) -> String? {
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    guard let m = re.firstMatch(in: text, range: range), m.numberOfRanges > 1,
+          let r = Range(m.range(at: 1), in: text) else { return nil }
+    return String(text[r])
+}
+
+func regexAll(_ pattern: String, in text: String) -> [String] {
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    var out: [String] = []
+    for m in re.matches(in: text, range: range) {
+        if m.numberOfRanges > 1, let r = Range(m.range(at: 1), in: text) {
+            out.append(String(text[r]))
+        }
+    }
+    return out
+}
+
+enum DirectLinkExtractor {
+    static func fetchString(_ urlStr: String, referer: String?) async -> String? {
+        guard let url = URL(string: urlStr) else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue(safariUA, forHTTPHeaderField: "User-Agent")
+        if let r = referer { req.setValue(r, forHTTPHeaderField: "Referer") }
+        req.timeoutInterval = 30
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+        } catch {
+            return nil
+        }
+    }
+
+    static func genericFile(html: String) -> URL? {
+        if let f = regexFirst("\"file\"\\s*:\\s*\"(https?://[^\"]+)\"", in: html) {
+            return URL(string: f)
+        }
+        if let mp4 = regexFirst("(https?://[^\"'\\s]+\\.mp4[^\"'\\s]*)", in: html) {
+            return URL(string: mp4)
+        }
+        if let m3 = regexFirst("(https?://[^\"'\\s]+\\.m3u8[^\"'\\s]*)", in: html) {
+            return URL(string: m3)
+        }
+        return nil
+    }
+
+    static func streamtape(html: String) -> URL? {
+        if let idx = html.range(of: "robotlink") {
+            let tail = String(html[idx.lowerBound...].prefix(1200))
+            let stmt = tail.components(separatedBy: ";").first ?? tail
+            let parts = regexAll("'([^']+)'", in: stmt)
+            var joined = ""
+            for p in parts { joined += p }
+            if joined.contains("get_video") {
+                if joined.hasPrefix("//") { joined = "https:" + joined }
+                return URL(string: joined)
+            }
+        }
+        if let direct = regexFirst("(https?://[^\"'\\s]*get_video[^\"'\\s]*)", in: html) {
+            return URL(string: direct)
+        }
+        return nil
+    }
+
+    static func mixdrop(html: String) -> URL? {
+        var w = regexFirst("wurl\\s*=\\s*\"([^\"]+)\"", in: html)
+        if w == nil { w = regexFirst("wurl\\s*=\\s*'([^']+)'", in: html) }
+        guard var s = w else { return nil }
+        if s.hasPrefix("//") { s = "https:" + s }
+        return URL(string: s)
+    }
+
+    static func dood(embed: String, html: String) async -> URL? {
+        guard let pass = regexFirst("(/pass_md5/[^\"'\\s]+)", in: html) else { return nil }
+        guard let host = URL(string: embed)?.host else { return nil }
+        guard let baseRaw = await fetchString("https://\(host)" + pass, referer: embed) else { return nil }
+        let base = baseRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { return nil }
+        var token = regexFirst("token=([A-Za-z0-9]+)", in: html)
+        if token == nil { token = regexFirst("\"token\"\\s*:\\s*\"([A-Za-z0-9]+)\"", in: html) }
+        guard let tok = token else { return nil }
+        var expiry = regexFirst("expiry=([0-9]+)", in: html)
+        if expiry == nil { expiry = regexFirst("\"expiry\"\\s*:\\s*\"?([0-9]+)", in: html) }
+        let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        var rand = ""
+        for _ in 0..<10 { if let c = chars.randomElement() { rand.append(c) } }
+        var final = base + rand + "?token=" + tok
+        if let ex = expiry { final += "&expiry=" + ex }
+        return URL(string: final)
+    }
+
+    static func extract(server: Server, kind: String) async -> (URL?, String?) {
+        let embed = server.url
+        guard let html = await fetchString(embed, referer: "https://shofha.vercel.app") else {
+            return (nil, "تعذّر فتح صفحة السيرفر")
+        }
+        var found: URL? = nil
+        switch kind {
+        case "streamtape": found = streamtape(html: html)
+        case "mixdrop": found = mixdrop(html: html)
+        case "dood": found = await dood(embed: embed, html: html)
+        default: found = genericFile(html: html)
+        }
+        guard let u = found else {
+            return (nil, "ما لگينا رابط ملف مباشر بهذا السيرفر")
+        }
+        if u.absoluteString.contains(".m3u8") {
+            return (nil, "هذا السيرفر يبث بصيغة HLS — ما يتحوّل لملف واحد")
+        }
+        return (u, nil)
+    }
+}
+
+struct DownloadItem: Codable, Identifiable {
+    var key: String
+    var card: SavedCard
+    var season: Int?
+    var episode: Int?
+    var fileName: String
+    var bytes: Int64
+    var id: String { key }
+    var displayTitle: String { card.t.isEmpty ? card.l : card.t }
+}
+
+func downloadsDir() -> URL {
+    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    let dir = docs.appendingPathComponent("downloads", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDelegate {
+    @Published var items: [DownloadItem] = []
+    @Published var progress: [String: Double] = [:]
+    @Published var status: [String: String] = [:]
+    private var session: URLSession!
+    private var pendingMeta: [String: (SavedCard, Int?, Int?)] = [:]
+
+    override init() {
+        super.init()
+        items = loadJSON([DownloadItem].self, key: "lib.downloads") ?? []
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 120
+        session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
+    }
+
+    func isDownloaded(_ key: String) -> Bool {
+        for it in items { if it.key == key { return true } }
+        return false
+    }
+
+    func localURL(_ item: DownloadItem) -> URL {
+        downloadsDir().appendingPathComponent(item.fileName)
+    }
+
+    func start(card: Card, season: Int?, episode: Int?, servers: [Server]) {
+        let key = "\(card.i)-\(season ?? 0)-\(episode ?? 0)"
+        if isDownloaded(key) { return }
+        if progress[key] != nil { return }
+        if status[key] == "extracting" { return }
+        guard let pick = pickDownloadServer(servers) else {
+            status[key] = "لا يوجد سيرفر تحميل لهذا العنوان"
+            return
+        }
+        status[key] = "extracting"
+        let server = pick.0
+        let kind = pick.1
+        Task {
+            let (url, err) = await DirectLinkExtractor.extract(server: server, kind: kind)
+            await MainActor.run {
+                guard let url = url else {
+                    self.status[key] = err ?? "تعذّر استخراج رابط التحميل"
+                    return
+                }
+                self.status[key] = nil
+                var req = URLRequest(url: url)
+                req.setValue(safariUA, forHTTPHeaderField: "User-Agent")
+                req.setValue(server.url, forHTTPHeaderField: "Referer")
+                let task = self.session.downloadTask(with: req)
+                task.taskDescription = key
+                self.pendingMeta[key] = (SavedCard(card), season, episode)
+                self.progress[key] = 0
+                task.resume()
+            }
+        }
+    }
+
+    func cancel(key: String) {
+        session.getAllTasks { tasks in
+            for t in tasks where t.taskDescription == key { t.cancel() }
+        }
+        DispatchQueue.main.async {
+            self.progress[key] = nil
+            self.status[key] = nil
+            self.pendingMeta[key] = nil
+        }
+    }
+
+    func delete(_ item: DownloadItem) {
+        try? FileManager.default.removeItem(at: localURL(item))
+        items.removeAll { $0.key == item.key }
+        saveJSON(items, key: "lib.downloads")
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        guard let key = downloadTask.taskDescription else { return }
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let frac = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        DispatchQueue.main.async { self.progress[key] = frac }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        guard let key = downloadTask.taskDescription else { return }
+        guard let meta = pendingMeta[key] else { return }
+        let fileName = key + ".mp4"
+        let dest = downloadsDir().appendingPathComponent(fileName)
+        try? FileManager.default.removeItem(at: dest)
+        var size: Int64 = 0
+        do {
+            try FileManager.default.moveItem(at: location, to: dest)
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: dest.path),
+               let s = attrs[.size] as? NSNumber {
+                size = s.int64Value
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.status[key] = "فشل حفظ الملف على الجهاز"
+                self.progress[key] = nil
+                self.pendingMeta[key] = nil
+            }
+            return
+        }
+        let item = DownloadItem(key: key, card: meta.0, season: meta.1, episode: meta.2,
+                                fileName: fileName, bytes: size)
+        DispatchQueue.main.async {
+            self.items.removeAll { $0.key == key }
+            self.items.insert(item, at: 0)
+            saveJSON(self.items, key: "lib.downloads")
+            self.progress[key] = nil
+            self.pendingMeta[key] = nil
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let key = task.taskDescription else { return }
+        guard let error = error else { return }
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        DispatchQueue.main.async {
+            if self.progress[key] != nil {
+                self.status[key] = "فشل التحميل: \(error.localizedDescription)"
+                self.progress[key] = nil
+                self.pendingMeta[key] = nil
+            }
+        }
     }
 }
 
@@ -863,11 +1143,37 @@ struct AmbienceBackground: View {
     }
 }
 
+func dominantColor(of image: UIImage) -> Color? {
+    guard let cg = image.cgImage else { return nil }
+    var px: [UInt8] = [0, 0, 0, 0]
+    let space = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(data: &px, width: 1, height: 1, bitsPerComponent: 8,
+                              bytesPerRow: 4, space: space,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+    return Color(red: Double(px[0]) / 255, green: Double(px[1]) / 255, blue: Double(px[2]) / 255)
+}
+
+struct AccentAmbience: View {
+    let accent: Color?
+    var body: some View {
+        ZStack {
+            Color.brandBg
+            RadialGradient(colors: [(accent ?? Color.brandViolet).opacity(0.30), .clear],
+                           center: .top, startRadius: 10, endRadius: 440)
+            RadialGradient(colors: [Color.brandCyan.opacity(0.08), .clear],
+                           center: .bottom, startRadius: 30, endRadius: 380)
+        }
+        .ignoresSafeArea()
+    }
+}
+
 // MARK: - Root
 
 struct ContentView: View {
     @StateObject private var store = AppStore()
     @StateObject private var library = Library()
+    @StateObject private var downloads = DownloadManager()
 
     var body: some View {
         Group {
@@ -916,6 +1222,7 @@ struct ContentView: View {
         }
         .environmentObject(store)
         .environmentObject(library)
+        .environmentObject(downloads)
         .environment(\.layoutDirection, .rightToLeft)
         .preferredColorScheme(.dark)
         .task { await store.loadHome() }
@@ -1524,11 +1831,32 @@ struct SearchView: View {
 
 struct FavoritesView: View {
     @EnvironmentObject var library: Library
+    @EnvironmentObject var downloads: DownloadManager
 
     private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
 
     var body: some View {
         ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                NavigationLink(destination: DownloadsView()) {
+                    HStack(spacing: 11) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 20)).foregroundColor(Color.brandCyan)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("تنزيلاتي").font(.system(size: 15, weight: .black)).foregroundColor(.white)
+                            Text(downloads.items.isEmpty ? "لسا ما حمّلت شي" : "\(downloads.items.count) عنوان محمّل على الجهاز")
+                                .font(.system(size: 11.5)).foregroundColor(.gray)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.left").font(.system(size: 12, weight: .bold)).foregroundColor(.gray)
+                    }
+                    .padding(14)
+                    .background(Color.white.opacity(0.05)).cornerRadius(14)
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
             if library.favorites.isEmpty {
                 VStack(spacing: 12) {
                     Text("🤍").font(.system(size: 42))
@@ -1548,10 +1876,97 @@ struct FavoritesView: View {
                 }
                 .padding(16)
             }
+            }
         }
         .background(AmbienceBackground())
         .navigationTitle("قائمتي")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct DownloadsView: View {
+    @EnvironmentObject var downloads: DownloadManager
+
+    var body: some View {
+        ScrollView {
+            if downloads.items.isEmpty {
+                VStack(spacing: 12) {
+                    Text("⬇️").font(.system(size: 42))
+                    Text("لا توجد تنزيلات بعد").font(.headline).foregroundColor(.white)
+                    Text("افتح أي عنوان عنده سيرفر تحميل واضغط «تحميل للمشاهدة بدون نت»")
+                        .font(.footnote).foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity).padding(.top, 90).padding(.horizontal, 30)
+            } else {
+                VStack(spacing: 12) {
+                    ForEach(downloads.items) { item in
+                        HStack(spacing: 12) {
+                            PosterImage(url: item.card.p)
+                                .frame(width: 52, height: 78)
+                                .cornerRadius(8)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.displayTitle)
+                                    .font(.system(size: 14, weight: .bold)).foregroundColor(.white)
+                                    .lineLimit(2)
+                                if let s = item.season, let e = item.episode {
+                                    Text("الموسم \(s) • حلقة \(e)")
+                                        .font(.system(size: 11.5, weight: .semibold)).foregroundColor(Color.brandCyan)
+                                }
+                                Text(String(format: "%.0f MB", Double(item.bytes) / 1_000_000))
+                                    .font(.system(size: 11)).foregroundColor(.gray)
+                            }
+                            Spacer()
+                            NavigationLink(destination: LocalPlayerView(item: item)) {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 30)).foregroundColor(Color.brandCyan)
+                            }
+                            .buttonStyle(.plain)
+                            Button(action: { downloads.delete(item) }) {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 15)).foregroundColor(.red.opacity(0.85))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(11)
+                        .background(Color.white.opacity(0.05)).cornerRadius(14)
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .background(AmbienceBackground())
+        .navigationTitle("تنزيلاتي")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct LocalPlayerView: View {
+    let item: DownloadItem
+    @EnvironmentObject var downloads: DownloadManager
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let player = player {
+                VideoPlayer(player: player)
+            } else {
+                ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+            }
+        }
+        .navigationTitle(item.displayTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            if player == nil {
+                player = AVPlayer(url: downloads.localURL(item))
+            }
+            player?.play()
+        }
+        .onDisappear {
+            player?.pause()
+        }
     }
 }
 
@@ -1563,9 +1978,11 @@ struct DetailView: View {
     var startEpisode: Int? = nil
     @EnvironmentObject var store: AppStore
     @EnvironmentObject var library: Library
+    @EnvironmentObject var downloads: DownloadManager
     @State private var detail: Detail?
     @State private var season: Int = 0
     @State private var episode: Episode? = nil
+    @State private var accent: Color? = nil
 
     var body: some View {
         ScrollView {
@@ -1588,7 +2005,7 @@ struct DetailView: View {
             }
             .padding(.bottom, 26)
         }
-        .background(AmbienceBackground())
+        .background(AccentAmbience(accent: accent))
         .navigationBarTitleDisplayMode(.inline)
         .task {
             detail = await store.detail(for: card)
@@ -1603,6 +2020,9 @@ struct DetailView: View {
                     for ep in eps { if ep.n == se { episode = ep } }
                 }
             }
+            if accent == nil, let img = await ImageLoader.load(card.p) {
+                accent = dominantColor(of: img)
+            }
         }
     }
 
@@ -1612,6 +2032,10 @@ struct DetailView: View {
                 .frame(height: 350)
                 .blur(radius: 26)
                 .opacity(0.5)
+            if let accent = accent {
+                Rectangle().fill(accent).opacity(0.22)
+                    .frame(height: 350)
+            }
             LinearGradient(colors: [.clear, Color.brandBg], startPoint: .top, endPoint: .bottom)
             HStack(alignment: .bottom, spacing: 15) {
                 PosterImage(url: card.p)
@@ -1741,6 +2165,7 @@ struct DetailView: View {
                 if let ep = episode {
                     serverButtons(servers: ep.servers, defaultURL: ep.defaultURL,
                                   title: "\(card.t.isEmpty ? card.l : card.t) — الموسم \(season) حلقة \(ep.n)")
+                    downloadSection(servers: ep.servers)
                 } else {
                     Text("اختر حلقة لعرض سيرفراتها")
                         .font(.system(size: 13)).foregroundColor(.gray)
@@ -1760,6 +2185,7 @@ struct DetailView: View {
             .buttonStyle(PressScaleStyle())
             serverButtons(servers: det.servers, defaultURL: det.defaultURL,
                           title: card.t.isEmpty ? card.l : card.t)
+            downloadSection(servers: det.servers)
         } else {
             Text("لا توجد سيرفرات متاحة لهذا العنوان حالياً")
                 .font(.system(size: 13)).foregroundColor(.gray)
@@ -1768,6 +2194,59 @@ struct DetailView: View {
     }
 
     @ViewBuilder
+    @ViewBuilder
+    private func downloadSection(servers: [Server]) -> some View {
+        if pickDownloadServer(servers) != nil {
+            let key = "\(card.i)-\(episode != nil ? season : 0)-\(episode?.n ?? 0)"
+            VStack(alignment: .leading, spacing: 8) {
+                if downloads.isDownloaded(key) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(Color.brandCyan)
+                        Text("محمّل على الجهاز — موجود بصفحة تنزيلاتي")
+                            .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.white.opacity(0.8))
+                    }
+                } else if downloads.status[key] == "extracting" {
+                    HStack(spacing: 9) {
+                        ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        Text("جاري استخراج رابط التحميل…")
+                            .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.white.opacity(0.8))
+                    }
+                } else if let p = downloads.progress[key] {
+                    HStack(spacing: 10) {
+                        ProgressView(value: p).progressViewStyle(LinearProgressViewStyle(tint: Color.brandCyan))
+                        Text("\(Int(p * 100))%")
+                            .font(.system(size: 12.5, weight: .black)).foregroundColor(.white)
+                        Button(action: { downloads.cancel(key: key) }) {
+                            Image(systemName: "xmark.circle.fill").foregroundColor(.gray)
+                        }
+                    }
+                } else {
+                    Button(action: {
+                        downloads.start(card: card,
+                                        season: episode != nil ? season : nil,
+                                        episode: episode?.n,
+                                        servers: servers)
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.down.circle.fill")
+                            Text("تحميل للمشاهدة بدون نت")
+                                .font(.system(size: 13.5, weight: .bold))
+                        }
+                        .foregroundColor(Color.brandCyan)
+                        .padding(.horizontal, 15).padding(.vertical, 10)
+                        .background(Color.brandCyan.opacity(0.12)).cornerRadius(11)
+                        .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.brandCyan.opacity(0.35), lineWidth: 1))
+                    }
+                    .buttonStyle(PressScaleStyle())
+                    if let st = downloads.status[key] {
+                        Text(st).font(.system(size: 12, weight: .semibold)).foregroundColor(.orange)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
     private func serverButtons(servers: [Server], defaultURL: String?, title: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if let first = servers.first {
@@ -1775,7 +2254,9 @@ struct DetailView: View {
                                                        initialURL: defaultURL ?? first.url,
                                                        card: card,
                                                        seasonNum: episode != nil ? season : nil,
-                                                       episodeNum: episode?.n)) {
+                                                       episodeNum: episode?.n,
+                                                       seasonEpisodes: episode != nil ? (detail?.seasons[String(season)] ?? []) : [],
+                                                       seriesName: card.t.isEmpty ? card.l : card.t)) {
                     HStack(spacing: 10) {
                         ZStack {
                             Circle().fill(Color.white)
@@ -1806,18 +2287,26 @@ struct PlayerView: View {
     let card: Card?
     let seasonNum: Int?
     let episodeNum: Int?
+    let seasonEpisodes: [Episode]
+    let seriesName: String
     @EnvironmentObject var library: Library
     @State private var idx: Int
     @State private var phase = 0
     @State private var switched = false
+    @State private var curTitle: String
+    @State private var curServers: [Server]
+    @State private var epPos: Int
 
     init(title: String, servers: [Server], initialURL: String,
-         card: Card? = nil, seasonNum: Int? = nil, episodeNum: Int? = nil) {
+         card: Card? = nil, seasonNum: Int? = nil, episodeNum: Int? = nil,
+         seasonEpisodes: [Episode] = [], seriesName: String = "") {
         self.title = title
         self.servers = servers
         self.card = card
         self.seasonNum = seasonNum
         self.episodeNum = episodeNum
+        self.seasonEpisodes = seasonEpisodes
+        self.seriesName = seriesName
         var start = 0
         for i in servers.indices {
             if cleanURL(servers[i].url) == cleanURL(initialURL) {
@@ -1826,15 +2315,27 @@ struct PlayerView: View {
             }
         }
         _idx = State(initialValue: start)
+        _curTitle = State(initialValue: title)
+        _curServers = State(initialValue: servers)
+        var pos = 0
+        for (i, ep) in seasonEpisodes.enumerated() {
+            if ep.n == episodeNum { pos = i }
+        }
+        _epPos = State(initialValue: pos)
     }
 
     private var currentURL: String {
-        if servers.isEmpty { return "" }
-        return cleanURL(servers[idx].url)
+        if curServers.isEmpty { return "" }
+        return cleanURL(curServers[idx].url)
+    }
+
+    private var currentEpisodeNum: Int? {
+        if !seasonEpisodes.isEmpty { return seasonEpisodes[epPos].n }
+        return episodeNum
     }
 
     private func advance() {
-        if idx + 1 < servers.count {
+        if idx + 1 < curServers.count {
             switched = true
             phase = 0
             idx += 1
@@ -1843,17 +2344,39 @@ struct PlayerView: View {
         }
     }
 
+    private func goEpisode(_ pos: Int) {
+        guard pos >= 0, pos < seasonEpisodes.count else { return }
+        let ep = seasonEpisodes[pos]
+        if ep.servers.isEmpty { return }
+        epPos = pos
+        curServers = ep.servers
+        var start = 0
+        for i in ep.servers.indices {
+            if cleanURL(ep.servers[i].url) == cleanURL(ep.defaultURL ?? "") {
+                start = i
+                break
+            }
+        }
+        idx = start
+        phase = 0
+        switched = false
+        if !seriesName.isEmpty, let sn = seasonNum {
+            curTitle = "\(seriesName) — الموسم \(sn) حلقة \(ep.n)"
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
                 Color.black
-                if !servers.isEmpty && phase != 2 {
+                if !curServers.isEmpty && phase != 2 {
                     PlayerWebView(url: currentURL,
                                   onSuccess: {
                                       phase = 1
                                       if let c = card {
-                                          library.recordProgress(card: c, season: seasonNum, episode: episodeNum)
-                                          if let s = seasonNum, let e = episodeNum {
+                                          let recEp = currentEpisodeNum
+                                          library.recordProgress(card: c, season: seasonNum, episode: recEp)
+                                          if let s = seasonNum, let e = recEp {
                                               library.markWatchedEp(c.i, s, e)
                                           } else {
                                               library.markWatchedTitle(c.i)
@@ -1899,6 +2422,43 @@ struct PlayerView: View {
             .padding(.horizontal, 12)
             .padding(.top, 10)
 
+            if seasonEpisodes.count > 1 {
+                HStack(spacing: 12) {
+                    Button(action: { goEpisode(epPos - 1) }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "backward.end.fill")
+                            Text("السابقة")
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(Color.white.opacity(0.07)).cornerRadius(11)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                    .disabled(epPos <= 0)
+                    .opacity(epPos <= 0 ? 0.35 : 1)
+                    Spacer()
+                    Text("حلقة \(seasonEpisodes[epPos].n) من \(seasonEpisodes.count)")
+                        .font(.system(size: 12, weight: .semibold)).foregroundColor(.gray)
+                    Spacer()
+                    Button(action: { goEpisode(epPos + 1) }) {
+                        HStack(spacing: 6) {
+                            Text("التالي")
+                            Image(systemName: "forward.end.fill")
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(Color.white.opacity(0.07)).cornerRadius(11)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                    .disabled(epPos >= seasonEpisodes.count - 1)
+                    .opacity(epPos >= seasonEpisodes.count - 1 ? 0.35 : 1)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+
             HStack(spacing: 8) {
                 Image(systemName: "lightbulb.fill").foregroundColor(Color.brandGold).font(.system(size: 13))
                 Text("التطبيق يبدّل تلقائياً بين السيرفرات إذا توقف واحد، وللصورة داخل صورة (PiP) كبّر الفيديو من زر ملء الشاشة داخل المشغّل.")
@@ -1912,7 +2472,7 @@ struct PlayerView: View {
             Spacer()
         }
         .background(AmbienceBackground())
-        .navigationTitle(title)
+        .navigationTitle(curTitle)
         .navigationBarTitleDisplayMode(.inline)
     }
 }
