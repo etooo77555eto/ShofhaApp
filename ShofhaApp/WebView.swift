@@ -1884,6 +1884,85 @@ struct FavoritesView: View {
     }
 }
 
+struct DownloadSectionView: View {
+    let card: Card
+    let seasonNum: Int
+    let episodeNum: Int?
+    let servers: [Server]
+    @EnvironmentObject var downloads: DownloadManager
+
+    private var key: String { "\(card.i)-\(seasonNum)-\(episodeNum ?? 0)" }
+
+    var body: some View {
+        if pickDownloadServer(servers) != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                if downloads.isDownloaded(key) {
+                    downloadedRow
+                } else if downloads.status[key] == "extracting" {
+                    extractingRow
+                } else if let p = downloads.progress[key] {
+                    progressRow(p)
+                } else {
+                    startRow
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private var downloadedRow: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "checkmark.circle.fill").foregroundColor(Color.brandCyan)
+            Text("محمّل على الجهاز — موجود بصفحة تنزيلاتي")
+                .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.white.opacity(0.8))
+        }
+    }
+
+    private var extractingRow: some View {
+        HStack(spacing: 9) {
+            ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+            Text("جاري استخراج رابط التحميل…")
+                .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.white.opacity(0.8))
+        }
+    }
+
+    private func progressRow(_ p: Double) -> some View {
+        HStack(spacing: 10) {
+            ProgressView(value: p).progressViewStyle(LinearProgressViewStyle(tint: Color.brandCyan))
+            Text("\(Int(p * 100))%")
+                .font(.system(size: 12.5, weight: .black)).foregroundColor(.white)
+            Button(action: { downloads.cancel(key: key) }) {
+                Image(systemName: "xmark.circle.fill").foregroundColor(.gray)
+            }
+        }
+    }
+
+    private var startRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button(action: {
+                downloads.start(card: card,
+                                season: episodeNum != nil ? seasonNum : nil,
+                                episode: episodeNum,
+                                servers: servers)
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle.fill")
+                    Text("تحميل للمشاهدة بدون نت")
+                        .font(.system(size: 13.5, weight: .bold))
+                }
+                .foregroundColor(Color.brandCyan)
+                .padding(.horizontal, 15).padding(.vertical, 10)
+                .background(Color.brandCyan.opacity(0.12)).cornerRadius(11)
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.brandCyan.opacity(0.35), lineWidth: 1))
+            }
+            .buttonStyle(PressScaleStyle())
+            if let st = downloads.status[key] {
+                Text(st).font(.system(size: 12, weight: .semibold)).foregroundColor(.orange)
+            }
+        }
+    }
+}
+
 // MARK: - Detail
 
 struct DetailView: View {
@@ -2079,6 +2158,7 @@ struct DetailView: View {
                 if let ep = episode {
                     serverButtons(servers: ep.servers, defaultURL: ep.defaultURL,
                                   title: "\(card.t.isEmpty ? card.l : card.t) — الموسم \(season) حلقة \(ep.n)")
+                    DownloadSectionView(card: card, seasonNum: season, episodeNum: ep.n, servers: ep.servers)
                 } else {
                     Text("اختر حلقة لعرض سيرفراتها")
                         .font(.system(size: 13)).foregroundColor(.gray)
@@ -2098,6 +2178,7 @@ struct DetailView: View {
             .buttonStyle(PressScaleStyle())
             serverButtons(servers: det.servers, defaultURL: det.defaultURL,
                           title: card.t.isEmpty ? card.l : card.t)
+            DownloadSectionView(card: card, seasonNum: 0, episodeNum: nil, servers: det.servers)
         } else {
             Text("لا توجد سيرفرات متاحة لهذا العنوان حالياً")
                 .font(.system(size: 13)).foregroundColor(.gray)
