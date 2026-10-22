@@ -222,6 +222,137 @@ func seasonNumbers(of det: Detail) -> [Int] {
     return nums.sorted()
 }
 
+func totalEpisodes(of det: Detail) -> Int {
+    var n = 0
+    for (_, eps) in det.seasons { n += eps.count }
+    return n
+}
+
+// MARK: - Local library (favorites / progress / watched)
+
+struct SavedCard: Codable {
+    var i: Int
+    var t: String
+    var l: String
+    var p: String
+    var y: Int?
+    var g: [String]
+    var r: Double?
+    var k: String
+    var e: Int?
+    var sc: Int?
+    var d: String?
+    var dub: Bool
+    var q: String
+
+    init(_ c: Card) {
+        i = c.i; t = c.t; l = c.l; p = c.p; y = c.y; g = c.g; r = c.r
+        k = c.k; e = c.e; sc = c.sc; d = c.d; dub = c.dub; q = c.q
+    }
+
+    var card: Card {
+        Card(i: i, t: t, l: l, p: p, y: y, g: g, r: r, k: k, e: e, sc: sc, d: d, dub: dub, q: q)
+    }
+}
+
+struct ProgressItem: Codable, Identifiable {
+    var card: SavedCard
+    var season: Int?
+    var episode: Int?
+    var updated: Double
+    var id: Int { card.i }
+}
+
+func saveJSON<T: Encodable>(_ value: T, key: String) {
+    if let data = try? JSONEncoder().encode(value) {
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+func loadJSON<T: Decodable>(_ type: T.Type, key: String) -> T? {
+    guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+    return try? JSONDecoder().decode(type, from: data)
+}
+
+final class Library: ObservableObject {
+    @Published var favorites: [SavedCard] = []
+    @Published var progress: [ProgressItem] = []
+    @Published var watched: Set<String> = []
+
+    init() {
+        favorites = loadJSON([SavedCard].self, key: "lib.favs") ?? []
+        progress = loadJSON([ProgressItem].self, key: "lib.progress") ?? []
+        let w = loadJSON([String].self, key: "lib.watched") ?? []
+        watched = Set(w)
+    }
+
+    func isFav(_ id: Int) -> Bool {
+        for f in favorites { if f.i == id { return true } }
+        return false
+    }
+
+    func toggleFav(_ card: Card) {
+        if isFav(card.i) {
+            favorites.removeAll { $0.i == card.i }
+        } else {
+            favorites.insert(SavedCard(card), at: 0)
+        }
+        saveJSON(favorites, key: "lib.favs")
+    }
+
+    func recordProgress(card: Card, season: Int?, episode: Int?) {
+        progress.removeAll { $0.card.i == card.i }
+        let item = ProgressItem(card: SavedCard(card), season: season, episode: episode,
+                                updated: Date().timeIntervalSince1970)
+        progress.insert(item, at: 0)
+        if progress.count > 24 { progress = Array(progress.prefix(24)) }
+        saveJSON(progress, key: "lib.progress")
+    }
+
+    func removeProgress(_ id: Int) {
+        progress.removeAll { $0.card.i == id }
+        saveJSON(progress, key: "lib.progress")
+    }
+
+    static func titleKey(_ id: Int) -> String { "t:\(id)" }
+    static func epKey(_ id: Int, _ s: Int, _ e: Int) -> String { "e:\(id):\(s):\(e)" }
+
+    func isWatchedTitle(_ id: Int) -> Bool { watched.contains(Self.titleKey(id)) }
+
+    func markWatchedTitle(_ id: Int) {
+        watched.insert(Self.titleKey(id))
+        saveJSON(Array(watched), key: "lib.watched")
+    }
+
+    func toggleWatchedTitle(_ id: Int) {
+        let k = Self.titleKey(id)
+        if watched.contains(k) { watched.remove(k) } else { watched.insert(k) }
+        saveJSON(Array(watched), key: "lib.watched")
+    }
+
+    func isWatchedEp(_ id: Int, _ s: Int, _ e: Int) -> Bool {
+        watched.contains(Self.epKey(id, s, e))
+    }
+
+    func markWatchedEp(_ id: Int, _ s: Int, _ e: Int) {
+        watched.insert(Self.epKey(id, s, e))
+        saveJSON(Array(watched), key: "lib.watched")
+    }
+
+    func toggleWatchedEp(_ id: Int, _ s: Int, _ e: Int) {
+        let k = Self.epKey(id, s, e)
+        if watched.contains(k) { watched.remove(k) } else { watched.insert(k) }
+        saveJSON(Array(watched), key: "lib.watched")
+    }
+
+    func watchedEpCount(for id: Int) -> Int {
+        let prefix = "e:\(id):"
+        var n = 0
+        for k in watched { if k.hasPrefix(prefix) { n += 1 } }
+        return n
+    }
+}
+
 // MARK: - Data store
 
 @MainActor
@@ -365,6 +496,21 @@ final class AppStore: ObservableObject {
 
 enum ImageLoader {
     static let memory = NSCache<NSString, UIImage>()
+    private static var errors: [String: String] = [:]
+
+    static func lastError(for urlString: String) -> String? {
+        guard let url = safeURL(urlString) else { return nil }
+        return errors[url.absoluteString]
+    }
+
+    static func weservURL(for url: URL) -> URL? {
+        var s = url.absoluteString
+        if s.hasPrefix("https://") { s = String(s.dropFirst(8)) }
+        else if s.hasPrefix("http://") { s = String(s.dropFirst(7)) }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/")
+        guard let enc = s.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+        return URL(string: "https://images.weserv.nl/?url=\(enc)&w=400&output=jpg")
+    }
 
     private static var session: URLSession = {
         let cfg = URLSessionConfiguration.default
@@ -393,13 +539,34 @@ enum ImageLoader {
             }
             do {
                 let (data, resp) = try await session.data(for: req)
-                if let http = resp as? HTTPURLResponse, http.statusCode != 200 { continue }
+                if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                    errors[url.absoluteString] = "HTTP \(http.statusCode)"
+                    continue
+                }
                 if let img = downsampled(data) {
                     memory.setObject(img, forKey: key)
                     return img
                 }
+                errors[url.absoluteString] = "البيانات المستلمة ليست صورة"
             } catch {
+                errors[url.absoluteString] = error.localizedDescription
                 continue
+            }
+        }
+        // Final fallback: the weserv proxy fetches server-side, sidestepping
+        // hotlink and TLS refusals of the source hosts.
+        if let proxy = weservURL(for: url) {
+            do {
+                let (data, resp) = try await session.data(for: URLRequest(url: proxy))
+                if let http = resp as? HTTPURLResponse, http.statusCode == 200, let img = downsampled(data) {
+                    memory.setObject(img, forKey: key)
+                    return img
+                }
+                let prev = errors[url.absoluteString] ?? ""
+                errors[url.absoluteString] = prev + " + فشل المصدر الاحتياطي"
+            } catch {
+                let prev = errors[url.absoluteString] ?? ""
+                errors[url.absoluteString] = prev + " + احتياطي: \(error.localizedDescription)"
             }
         }
         return nil
@@ -433,6 +600,7 @@ struct PosterImage: View {
     @State private var image: UIImage?
     @State private var failed = false
     @State private var loading = false
+    @State private var showDiag = false
 
     var body: some View {
         ZStack {
@@ -456,6 +624,20 @@ struct PosterImage: View {
         .clipped()
         .task(id: url) { await load() }
         .onAppear { Task { await load() } }
+        .onLongPressGesture {
+            if failed { showDiag = true }
+        }
+        .alert("تشخيص البوستر", isPresented: $showDiag) {
+            Button("تمام", role: .cancel) {}
+        } message: {
+            Text(diagText)
+        }
+    }
+
+    private var diagText: String {
+        let host = URL(string: url)?.host ?? "مصدر غير معروف"
+        let err = ImageLoader.lastError(for: url) ?? "سبب غير معروف"
+        return "المصدر: \(host)\nالسبب: \(err)"
     }
 
     private func load() async {
@@ -648,6 +830,7 @@ struct AmbienceBackground: View {
 
 struct ContentView: View {
     @StateObject private var store = AppStore()
+    @StateObject private var library = Library()
 
     var body: some View {
         Group {
@@ -687,11 +870,15 @@ struct ContentView: View {
                     NavigationView { SearchView() }
                         .navigationViewStyle(.stack)
                         .tabItem { Label("بحث", systemImage: "magnifyingglass") }
+                    NavigationView { FavoritesView() }
+                        .navigationViewStyle(.stack)
+                        .tabItem { Label("قائمتي", systemImage: "heart.fill") }
                 }
                 .accentColor(Color.brandCyan)
             }
         }
         .environmentObject(store)
+        .environmentObject(library)
         .environment(\.layoutDirection, .rightToLeft)
         .preferredColorScheme(.dark)
         .task { await store.loadHome() }
@@ -702,12 +889,42 @@ struct ContentView: View {
 
 struct HomeView: View {
     @EnvironmentObject var store: AppStore
+    @EnvironmentObject var library: Library
 
     var body: some View {
         ScrollView {
             if let home = store.home {
                 VStack(alignment: .leading, spacing: 30) {
                     HeroPager(cards: home.hero)
+
+                    if !library.progress.isEmpty {
+                        VStack(alignment: .leading, spacing: 11) {
+                            SectionHeader(title: "▶️ تابع المشاهدة")
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    ForEach(library.progress) { item in
+                                        NavigationLink(destination: DetailView(card: item.card.card, startSeason: item.season, startEpisode: item.episode)) {
+                                            VStack(alignment: .leading, spacing: 5) {
+                                                CardCell(card: item.card.card).frame(width: 110)
+                                                if let s = item.season, let e = item.episode {
+                                                    Text("الموسم \(s) • حلقة \(e)")
+                                                        .font(.system(size: 10.5, weight: .bold)).foregroundColor(Color.brandCyan)
+                                                }
+                                            }
+                                        }
+                                        .buttonStyle(.plain)
+                                        .contextMenu {
+                                            Button("إزالة من تابع المشاهدة", role: .destructive) {
+                                                library.removeProgress(item.card.i)
+                                            }
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                            }
+                        }
+                    }
+
                     CardRowView(title: "🔥 ترند شوفها اليوم", cards: home.trend)
 
                     if !home.cols.isEmpty {
@@ -1086,9 +1303,49 @@ struct SearchView: View {
 
 // MARK: - Detail
 
+// MARK: - My List
+
+struct FavoritesView: View {
+    @EnvironmentObject var library: Library
+
+    private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+
+    var body: some View {
+        ScrollView {
+            if library.favorites.isEmpty {
+                VStack(spacing: 12) {
+                    Text("🤍").font(.system(size: 42))
+                    Text("قائمتك فارغة").font(.headline).foregroundColor(.white)
+                    Text("اضغط زر القلب بأي عمل حتى ينحفظ هنا")
+                        .font(.footnote).foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity).padding(.top, 90)
+            } else {
+                LazyVGrid(columns: cols, spacing: 16) {
+                    ForEach(library.favorites, id: \.i) { saved in
+                        NavigationLink(destination: DetailView(card: saved.card)) {
+                            CardCell(card: saved.card)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .background(AmbienceBackground())
+        .navigationTitle("قائمتي")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Detail
+
 struct DetailView: View {
     let card: Card
+    var startSeason: Int? = nil
+    var startEpisode: Int? = nil
     @EnvironmentObject var store: AppStore
+    @EnvironmentObject var library: Library
     @State private var detail: Detail?
     @State private var season: Int = 0
     @State private var episode: Episode? = nil
@@ -1118,7 +1375,17 @@ struct DetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             detail = await store.detail(for: card)
-            if let det = detail, let first = seasonNumbers(of: det).first { season = first }
+            if let det = detail {
+                let nums = seasonNumbers(of: det)
+                if let ss = startSeason, nums.contains(ss) {
+                    season = ss
+                } else if let first = nums.first {
+                    season = first
+                }
+                if let se = startEpisode, let eps = det.seasons[String(season)] {
+                    for ep in eps { if ep.n == se { episode = ep } }
+                }
+            }
         }
     }
 
@@ -1169,6 +1436,24 @@ struct DetailView: View {
                 }
             }
             .padding(16)
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: { library.toggleFav(card) }) {
+                        Image(systemName: library.isFav(card.i) ? "heart.fill" : "heart")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(library.isFav(card.i) ? Color.red : Color.white)
+                            .frame(width: 38, height: 38)
+                            .background(Color.black.opacity(0.45))
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(Color.white.opacity(0.15), lineWidth: 1))
+                    }
+                    .buttonStyle(PressScaleStyle())
+                }
+                Spacer()
+            }
+            .padding(14)
         }
         .frame(height: 350)
     }
@@ -1188,6 +1473,11 @@ struct DetailView: View {
         if !seasonNumbers(of: det).isEmpty {
             VStack(alignment: .leading, spacing: 15) {
                 SectionHeader(title: "الحلقات")
+                if totalEpisodes(of: det) > 0 {
+                    Text("شاهدت \(library.watchedEpCount(for: card.i)) من \(totalEpisodes(of: det)) حلقة")
+                        .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.gray)
+                        .padding(.horizontal, 16)
+                }
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(seasonNumbers(of: det), id: \.self) { s in
@@ -1212,7 +1502,7 @@ struct DetailView: View {
                                     GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
                     ForEach(eps) { ep in
                         Button(action: { episode = ep }) {
-                            Text("\(ep.n)")
+                            Text(library.isWatchedEp(card.i, season, ep.n) ? "\(ep.n) ✓" : "\(ep.n)")
                                 .font(.system(size: 15.5, weight: .black))
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity).padding(.vertical, 13)
@@ -1222,6 +1512,11 @@ struct DetailView: View {
                                 .shadow(color: episode?.n == ep.n ? Color.brandPurple.opacity(0.4) : .clear, radius: 8, y: 3)
                         }
                         .buttonStyle(PressScaleStyle())
+                        .contextMenu {
+                            Button(library.isWatchedEp(card.i, season, ep.n) ? "إلغاء علامة المشاهدة" : "علّمها مشاهَدة") {
+                                library.toggleWatchedEp(card.i, season, ep.n)
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -1236,6 +1531,16 @@ struct DetailView: View {
                 }
             }
         } else if !det.servers.isEmpty {
+            Button(action: { library.toggleWatchedTitle(card.i) }) {
+                HStack(spacing: 8) {
+                    Image(systemName: library.isWatchedTitle(card.i) ? "checkmark.circle.fill" : "circle")
+                    Text(library.isWatchedTitle(card.i) ? "شاهدتها" : "علّمها مشاهَدة")
+                        .font(.system(size: 13.5, weight: .bold))
+                }
+                .foregroundColor(library.isWatchedTitle(card.i) ? Color.brandCyan : Color.white.opacity(0.8))
+                .padding(.horizontal, 16)
+            }
+            .buttonStyle(PressScaleStyle())
             serverButtons(servers: det.servers, defaultURL: det.defaultURL,
                           title: card.t.isEmpty ? card.l : card.t)
         } else {
@@ -1250,7 +1555,10 @@ struct DetailView: View {
         VStack(alignment: .leading, spacing: 12) {
             if let first = servers.first {
                 NavigationLink(destination: PlayerView(title: title, servers: servers,
-                                                       initialURL: defaultURL ?? first.url)) {
+                                                       initialURL: defaultURL ?? first.url,
+                                                       card: card,
+                                                       seasonNum: episode != nil ? season : nil,
+                                                       episodeNum: episode?.n)) {
                     HStack(spacing: 10) {
                         ZStack {
                             Circle().fill(Color.white)
@@ -1278,13 +1586,21 @@ struct DetailView: View {
 struct PlayerView: View {
     let title: String
     let servers: [Server]
+    let card: Card?
+    let seasonNum: Int?
+    let episodeNum: Int?
+    @EnvironmentObject var library: Library
     @State private var idx: Int
     @State private var phase = 0
     @State private var switched = false
 
-    init(title: String, servers: [Server], initialURL: String) {
+    init(title: String, servers: [Server], initialURL: String,
+         card: Card? = nil, seasonNum: Int? = nil, episodeNum: Int? = nil) {
         self.title = title
         self.servers = servers
+        self.card = card
+        self.seasonNum = seasonNum
+        self.episodeNum = episodeNum
         var start = 0
         for i in servers.indices {
             if cleanURL(servers[i].url) == cleanURL(initialURL) {
@@ -1316,7 +1632,17 @@ struct PlayerView: View {
                 Color.black
                 if !servers.isEmpty && phase != 2 {
                     PlayerWebView(url: currentURL,
-                                  onSuccess: { phase = 1 },
+                                  onSuccess: {
+                                      phase = 1
+                                      if let c = card {
+                                          library.recordProgress(card: c, season: seasonNum, episode: episodeNum)
+                                          if let s = seasonNum, let e = episodeNum {
+                                              library.markWatchedEp(c.i, s, e)
+                                          } else {
+                                              library.markWatchedTitle(c.i)
+                                          }
+                                      }
+                                  },
                                   onFailure: { advance() })
                         .id(currentURL)
                 }
