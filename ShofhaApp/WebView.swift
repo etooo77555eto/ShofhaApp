@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import ImageIO
+import UIKit
 
 // MARK: - Theme
 
@@ -278,12 +279,39 @@ final class Library: ObservableObject {
     @Published var favorites: [SavedCard] = []
     @Published var progress: [ProgressItem] = []
     @Published var watched: Set<String> = []
+    @Published var previousMaxDate: String = ""
 
     init() {
         favorites = loadJSON([SavedCard].self, key: "lib.favs") ?? []
         progress = loadJSON([ProgressItem].self, key: "lib.progress") ?? []
         let w = loadJSON([String].self, key: "lib.watched") ?? []
         watched = Set(w)
+        previousMaxDate = UserDefaults.standard.string(forKey: "lib.maxD") ?? ""
+    }
+
+    func isNew(_ card: Card) -> Bool {
+        if previousMaxDate.isEmpty { return false }
+        guard let d = card.d else { return false }
+        return d > previousMaxDate
+    }
+
+    func noteSeen(home: HomeData) {
+        var m = UserDefaults.standard.string(forKey: "lib.maxD") ?? ""
+        var pools: [[Card]] = []
+        pools.append(home.hero)
+        pools.append(home.trend)
+        pools.append(home.films)
+        pools.append(home.series)
+        pools.append(home.anime)
+        pools.append(home.turk)
+        for pool in pools {
+            for c in pool {
+                if let d = c.d, d > m { m = d }
+            }
+        }
+        if !m.isEmpty {
+            UserDefaults.standard.set(m, forKey: "lib.maxD")
+        }
     }
 
     func isFav(_ id: Int) -> Bool {
@@ -697,6 +725,7 @@ struct DubBadge: View {
 
 struct CardCell: View {
     let card: Card
+    @EnvironmentObject var library: Library
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topLeading) {
@@ -719,6 +748,14 @@ struct CardCell: View {
                         .background(Color.black.opacity(0.55)).cornerRadius(6)
                         .padding(6)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                }
+                if library.isNew(card) {
+                    Text("جديد")
+                        .font(.system(size: 9, weight: .heavy)).foregroundColor(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(Color.brandCyan).cornerRadius(7)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 }
             }
             Text(card.t.isEmpty ? card.l : card.t)
@@ -925,6 +962,10 @@ struct HomeView: View {
                         }
                     }
 
+                    if !freshCards(home).isEmpty {
+                        CardRowView(title: "🆕 نزل من آخر زيارة", cards: freshCards(home))
+                    }
+
                     CardRowView(title: "🔥 ترند شوفها اليوم", cards: home.trend)
 
                     if !home.cols.isEmpty {
@@ -1015,6 +1056,31 @@ struct HomeView: View {
         .background(AmbienceBackground())
         .navigationTitle("شوفها")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            if let h = store.home { library.noteSeen(home: h) }
+        }
+    }
+
+    private func freshCards(_ home: HomeData) -> [Card] {
+        var seen = Set<Int>()
+        var out: [Card] = []
+        var pools: [[Card]] = []
+        pools.append(home.hero)
+        pools.append(home.trend)
+        pools.append(home.films)
+        pools.append(home.series)
+        pools.append(home.anime)
+        pools.append(home.turk)
+        for pool in pools {
+            for c in pool {
+                if seen.contains(c.i) { continue }
+                if library.isNew(c) {
+                    seen.insert(c.i)
+                    out.append(c)
+                }
+            }
+        }
+        return Array(out.prefix(20))
     }
 }
 
@@ -1248,9 +1314,75 @@ struct BrowseView: View {
     }
 }
 
+func sendTitleRequest(_ title: String) {
+    let trimmed = title.trimmingCharacters(in: .whitespaces)
+    if trimmed.isEmpty { return }
+    let text = "🎬 طلب: " + trimmed
+    let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+    let enc = text.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
+    let urlStr = "https://t.me/share/url?url=https%3A%2F%2Fshofha.vercel.app&text=" + enc
+    if let u = URL(string: urlStr) {
+        UIApplication.shared.open(u, options: [:]) { ok in
+            if !ok { UIPasteboard.general.string = text }
+        }
+    } else {
+        UIPasteboard.general.string = text
+    }
+}
+
+struct RequestView: View {
+    @State private var title: String
+    @Environment(\.presentationMode) var pm
+
+    init(initial: String) {
+        _title = State(initialValue: initial)
+    }
+
+    var body: some View {
+        NavigationView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("اكتب اسم العمل اللي تريده، ويوصلك الطلب لبوت شوفها على تيليجرام — اختر محادثة البوت وارسله.")
+                    .font(.system(size: 13.5)).foregroundColor(.white.opacity(0.75))
+                    .lineSpacing(4)
+                TextField("اسم الفيلم أو المسلسل", text: $title)
+                    .foregroundColor(.white)
+                    .padding(13)
+                    .background(Color.white.opacity(0.06)).cornerRadius(12)
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                Button(action: {
+                    sendTitleRequest(title)
+                    pm.wrappedValue.dismiss()
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "paperplane.fill")
+                        Text("إرسال الطلب").font(.system(size: 15, weight: .black))
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity).padding(.vertical, 13)
+                    .background(Color.brandGradient).cornerRadius(13)
+                }
+                .buttonStyle(PressScaleStyle())
+                .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+                .opacity(title.trimmingCharacters(in: .whitespaces).isEmpty ? 0.5 : 1)
+                Spacer()
+            }
+            .padding(18)
+            .background(AmbienceBackground())
+            .navigationTitle("اطلب فيلم")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .navigationViewStyle(.stack)
+        .preferredColorScheme(.dark)
+    }
+}
+
 struct SearchView: View {
     @EnvironmentObject var store: AppStore
     @State private var query = ""
+    @State private var typeFilter = "الكل"
+    @State private var dubFilter = "الكل"
+    @State private var yearFilter = "الكل"
+    @State private var showRequest = false
 
     var body: some View {
         ScrollView {
@@ -1271,6 +1403,17 @@ struct SearchView: View {
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.1), lineWidth: 1))
                 .padding(.horizontal, 16)
 
+                Button(action: { showRequest = true }) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "paperplane.fill").font(.system(size: 12))
+                        Text("ما لگيت اللي تريده؟ اطلب فيلم")
+                            .font(.system(size: 12.5, weight: .bold))
+                    }
+                    .foregroundColor(Color.brandCyan)
+                    .padding(.horizontal, 16)
+                }
+                .buttonStyle(PressScaleStyle())
+
                 if query.trimmingCharacters(in: .whitespaces).count < 2 {
                     VStack(spacing: 10) {
                         Text("🔍").font(.system(size: 34))
@@ -1284,13 +1427,36 @@ struct SearchView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.top, 46)
                 } else {
+                    chipRow(["الكل", "أفلام", "مسلسلات", "أنمي", "تركي"], selection: $typeFilter)
+                    chipRow(["الكل", "مدبلج", "مترجم"], selection: $dubFilter)
+                    chipRow(["الكل", "2020+", "2010-2019", "2000-2009", "قبل 2000"], selection: $yearFilter)
                     let results = store.search(query)
                     if results.isEmpty {
-                        Text("لا توجد نتائج لـ «\(query)»")
-                            .font(.system(size: 14)).foregroundColor(.gray)
-                            .frame(maxWidth: .infinity).padding(.top, 40)
+                        VStack(spacing: 15) {
+                            Text("لا توجد نتائج لـ «\(query)»")
+                                .font(.system(size: 14)).foregroundColor(.gray)
+                            Button(action: { sendTitleRequest(query) }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "paperplane.fill")
+                                    Text("اطلب «\(query)» من بوت شوفها")
+                                        .font(.system(size: 13.5, weight: .bold))
+                                }
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 18).padding(.vertical, 11)
+                                .background(Color.brandGradient).cornerRadius(13)
+                            }
+                            .buttonStyle(PressScaleStyle())
+                        }
+                        .frame(maxWidth: .infinity).padding(.top, 40)
                     } else {
-                        GridView(cards: results)
+                        let filtered = applyFilters(results)
+                        if filtered.isEmpty {
+                            Text("لا توجد نتائج مطابقة للفلاتر المختارة")
+                                .font(.system(size: 14)).foregroundColor(.gray)
+                                .frame(maxWidth: .infinity).padding(.top, 40)
+                        } else {
+                            GridView(cards: filtered)
+                        }
                     }
                 }
             }
@@ -1298,6 +1464,57 @@ struct SearchView: View {
         }
         .background(AmbienceBackground())
         .navigationTitle("بحث")
+        .sheet(isPresented: $showRequest) {
+            RequestView(initial: query)
+        }
+    }
+
+    private func chipRow(_ options: [String], selection: Binding<String>) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                ForEach(options, id: \.self) { opt in
+                    Button(action: { selection.wrappedValue = opt }) {
+                        Text(opt)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 13).padding(.vertical, 7)
+                            .background(selection.wrappedValue == opt ? AnyShapeStyle(Color.brandGradient) : AnyShapeStyle(Color.white.opacity(0.06)))
+                            .cornerRadius(15)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private func yearOK(_ y: Int?) -> Bool {
+        if yearFilter == "الكل" { return true }
+        guard let y = y else { return false }
+        if yearFilter == "2020+" { return y >= 2020 }
+        if yearFilter == "2010-2019" { return y >= 2010 && y <= 2019 }
+        if yearFilter == "2000-2009" { return y >= 2000 && y <= 2009 }
+        if yearFilter == "قبل 2000" { return y < 2000 }
+        return true
+    }
+
+    private func applyFilters(_ cards: [Card]) -> [Card] {
+        var out: [Card] = []
+        var turkIDs = Set<Int>()
+        if typeFilter == "تركي" {
+            for c in store.turkCards { turkIDs.insert(c.i) }
+        }
+        for c in cards {
+            if typeFilter == "أفلام" && c.k != "film" { continue }
+            if typeFilter == "مسلسلات" && c.k != "series" { continue }
+            if typeFilter == "أنمي" && c.k != "anime" { continue }
+            if typeFilter == "تركي" && !turkIDs.contains(c.i) { continue }
+            if dubFilter == "مدبلج" && !c.dub { continue }
+            if dubFilter == "مترجم" && c.dub { continue }
+            if !yearOK(c.y) { continue }
+            out.append(c)
+        }
+        return out
     }
 }
 
