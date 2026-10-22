@@ -3,6 +3,7 @@ import WebKit
 import ImageIO
 import UIKit
 import AVKit
+import UniformTypeIdentifiers
 
 // MARK: - Theme
 
@@ -630,6 +631,9 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
 
     func delete(_ item: DownloadItem) {
         try? FileManager.default.removeItem(at: localURL(item))
+        try? FileManager.default.removeItem(at: downloadsDir().appendingPathComponent(item.key + ".srt"))
+        UserDefaults.standard.removeObject(forKey: "lib.pos." + item.key)
+        UserDefaults.standard.removeObject(forKey: "lib.dur." + item.key)
         items.removeAll { $0.key == item.key }
         saveJSON(items, key: "lib.downloads")
     }
@@ -2062,6 +2066,15 @@ struct DownloadsView: View {
                                 }
                                 Text(String(format: "%.0f MB", Double(item.bytes) / 1_000_000))
                                     .font(.system(size: 11)).foregroundColor(.gray)
+                                if downloadProgressFraction(for: item) > 0.01 {
+                                    HStack(spacing: 6) {
+                                        ProgressView(value: downloadProgressFraction(for: item))
+                                            .progressViewStyle(LinearProgressViewStyle(tint: Color.brandCyan))
+                                            .frame(width: 90)
+                                        Text("شاهدت \(Int(downloadProgressFraction(for: item) * 100))%")
+                                            .font(.system(size: 10.5, weight: .semibold)).foregroundColor(.gray)
+                                    }
+                                }
                             }
                             Spacer()
                             NavigationLink(destination: LocalPlayerView(item: item)) {
@@ -2089,30 +2102,298 @@ struct DownloadsView: View {
     }
 }
 
+struct SubCue {
+    let start: Double
+    let end: Double
+    let text: String
+}
+
+func srtTime(_ s: String) -> Double {
+    let cleaned = s.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+    let parts = cleaned.split(separator: ":")
+    guard parts.count == 3, let h = Double(parts[0]), let m = Double(parts[1]), let sec = Double(parts[2]) else { return 0 }
+    return h * 3600 + m * 60 + sec
+}
+
+func stripTags(_ s: String) -> String {
+    var out = s
+    if let re = try? NSRegularExpression(pattern: "<[^>]+>") {
+        let range = NSRange(out.startIndex..<out.endIndex, in: out)
+        out = re.stringByReplacingMatches(in: out, range: range, withTemplate: "")
+    }
+    return out
+}
+
+func parseSRT(_ content: String) -> [SubCue] {
+    let normalized = content.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    var cues: [SubCue] = []
+    for block in normalized.components(separatedBy: "\n\n") {
+        let lines = block.components(separatedBy: "\n")
+        var timeIdx: Int? = nil
+        for (i, line) in lines.enumerated() {
+            if line.contains("-->") { timeIdx = i; break }
+        }
+        guard let ti = timeIdx else { continue }
+        let sides = lines[ti].components(separatedBy: "-->")
+        guard sides.count == 2 else { continue }
+        let start = srtTime(sides[0])
+        let end = srtTime(sides[1])
+        var textLines: [String] = []
+        for j in (ti + 1)..<lines.count {
+            let t = lines[j].trimmingCharacters(in: .whitespaces)
+            if !t.isEmpty { textLines.append(t) }
+        }
+        if textLines.isEmpty { continue }
+        cues.append(SubCue(start: start, end: end, text: stripTags(textLines.joined(separator: " "))))
+    }
+    return cues
+}
+
+func subtitleFileURL(for item: DownloadItem) -> URL {
+    downloadsDir().appendingPathComponent(item.key + ".srt")
+}
+
+func downloadProgressFraction(for item: DownloadItem) -> Double {
+    let pos = UserDefaults.standard.double(forKey: "lib.pos." + item.key)
+    let dur = UserDefaults.standard.double(forKey: "lib.dur." + item.key)
+    if dur <= 0 || pos <= 0 { return 0 }
+    return min(1, pos / dur)
+}
+
+func decodeSubtitleData(_ data: Data) -> String? {
+    if let s = String(data: data, encoding: .utf8) { return s }
+    let cf = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(0x0506))
+    return String(data: data, encoding: String.Encoding(rawValue: cf))
+}
+
+final class LocalPlayerModel: ObservableObject {
+    let player = AVPlayer()
+    @Published var cueText: String = ""
+    @Published var isPlaying = false
+    var cues: [SubCue] = []
+    var showSubs = true
+    private var token: Any?
+    private var key: String = ""
+
+    func load(url: URL, key: String) {
+        self.key = key
+        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        let saved = UserDefaults.standard.double(forKey: "lib.pos." + key)
+        if saved > 5 {
+            player.seek(to: CMTime(seconds: saved, preferredTimescale: 600))
+        }
+        if let token = token { player.removeTimeObserver(token) }
+        token = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
+            guard let self = self else { return }
+            self.isPlaying = self.player.timeControlStatus == .playing
+            UserDefaults.standard.set(t.seconds, forKey: "lib.pos." + self.key)
+            if let current = self.player.currentItem {
+                let d = current.duration.seconds
+                if d > 0 { UserDefaults.standard.set(d, forKey: "lib.dur." + self.key) }
+            }
+            if self.showSubs {
+                self.cueText = self.cue(at: t.seconds)
+            } else if !self.cueText.isEmpty {
+                self.cueText = ""
+            }
+        }
+        player.play()
+    }
+
+    private func cue(at time: Double) -> String {
+        for c in cues {
+            if time >= c.start && time <= c.end { return c.text }
+        }
+        return ""
+    }
+
+    func togglePlay() {
+        if player.timeControlStatus == .playing { player.pause() } else { player.play() }
+    }
+
+    func seek(by delta: Double) {
+        let cur = player.currentTime().seconds
+        let dur = player.currentItem?.duration.seconds ?? 0
+        var target = cur + delta
+        if target < 0 { target = 0 }
+        if dur > 0 && target > dur { target = dur }
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+    }
+
+    func setRate(_ r: Float) {
+        player.rate = r
+    }
+
+    func stop() {
+        player.pause()
+        if let token = token {
+            player.removeTimeObserver(token)
+            self.token = nil
+        }
+    }
+
+    deinit {
+        if let token = token { player.removeTimeObserver(token) }
+    }
+}
+
 struct LocalPlayerView: View {
     let item: DownloadItem
     @EnvironmentObject var downloads: DownloadManager
-    @State private var player: AVPlayer?
+    @StateObject private var model = LocalPlayerModel()
+    @State private var rate: Float = 1.0
+    @State private var locked = false
+    @State private var showPicker = false
+    @State private var hasSubs = false
+
+    private let rates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if let player = player {
-                VideoPlayer(player: player)
-            } else {
-                ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
+            VStack(spacing: 0) {
+                ZStack(alignment: .bottom) {
+                    VideoPlayer(player: model.player)
+                    if !model.cueText.isEmpty {
+                        Text(model.cueText)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(Color.black.opacity(0.65))
+                            .cornerRadius(8)
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 26)
+                    }
+                }
+                if !locked {
+                    controls
+                }
+                Spacer(minLength: 0)
+            }
+            if locked {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button(action: { locked = false }) {
+                            Image(systemName: "lock.open.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.white)
+                                .padding(11)
+                                .background(Color.black.opacity(0.55))
+                                .clipShape(Circle())
+                        }
+                        .padding(14)
+                    }
+                    Spacer()
+                }
             }
         }
         .navigationTitle(item.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            if player == nil {
-                player = AVPlayer(url: downloads.localURL(item))
-            }
-            player?.play()
+            model.load(url: downloads.localURL(item), key: item.key)
+            loadSubtitlesIfPresent()
         }
         .onDisappear {
-            player?.pause()
+            model.stop()
+        }
+        .fileImporter(isPresented: $showPicker, allowedContentTypes: [UTType.data]) { result in
+            if case .success(let url) = result {
+                importSubtitles(from: url)
+            }
+        }
+    }
+
+    private var controls: some View {
+        VStack(spacing: 13) {
+            HStack(spacing: 26) {
+                Button(action: { model.seek(by: -10) }) {
+                    Image(systemName: "gobackward.10").font(.system(size: 24))
+                }
+                Button(action: { model.togglePlay() }) {
+                    Image(systemName: model.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 44)).foregroundColor(Color.brandCyan)
+                }
+                Button(action: { model.seek(by: 10) }) {
+                    Image(systemName: "goforward.10").font(.system(size: 24))
+                }
+            }
+            .foregroundColor(.white)
+            HStack(spacing: 7) {
+                ForEach(rates, id: \.self) { r in
+                    Button(action: { rate = r; model.setRate(r) }) {
+                        Text(rateLabel(r))
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 11).padding(.vertical, 6)
+                            .background(rate == r ? AnyShapeStyle(Color.brandGradient) : AnyShapeStyle(Color.white.opacity(0.08)))
+                            .cornerRadius(13)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                }
+            }
+            HStack(spacing: 10) {
+                Button(action: { showPicker = true }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "captions.bubble.fill")
+                        Text(hasSubs ? "تغيير ملف الترجمة" : "أضف ترجمة srt")
+                            .font(.system(size: 12.5, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 13).padding(.vertical, 8)
+                    .background(Color.white.opacity(0.08)).cornerRadius(11)
+                }
+                .buttonStyle(PressScaleStyle())
+                if hasSubs {
+                    Button(action: {
+                        model.showSubs.toggle()
+                        if !model.showSubs { model.cueText = "" }
+                    }) {
+                        Text(model.showSubs ? "إخفاء الترجمة" : "إظهار الترجمة")
+                            .font(.system(size: 12.5, weight: .bold)).foregroundColor(Color.brandCyan)
+                            .padding(.horizontal, 13).padding(.vertical, 8)
+                            .background(Color.brandCyan.opacity(0.12)).cornerRadius(11)
+                    }
+                    .buttonStyle(PressScaleStyle())
+                }
+                Spacer()
+                Button(action: { locked = true }) {
+                    Image(systemName: "lock.fill")
+                        .foregroundColor(.white)
+                        .padding(9)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(PressScaleStyle())
+            }
+        }
+        .padding(16)
+        .background(Color.brandBg)
+    }
+
+    private func rateLabel(_ r: Float) -> String {
+        if r == 1.0 { return "1×" }
+        return String(format: "%g×", Double(r))
+    }
+
+    private func loadSubtitlesIfPresent() {
+        let url = subtitleFileURL(for: item)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let data = try? Data(contentsOf: url), let text = decodeSubtitleData(data) else { return }
+        model.cues = parseSRT(text)
+        hasSubs = !model.cues.isEmpty
+    }
+
+    private func importSubtitles(from url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else { return }
+        try? data.write(to: subtitleFileURL(for: item))
+        if let text = decodeSubtitleData(data) {
+            model.cues = parseSRT(text)
+            hasSubs = !model.cues.isEmpty
+            model.showSubs = true
         }
     }
 }
