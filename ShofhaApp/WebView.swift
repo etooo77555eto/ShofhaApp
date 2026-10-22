@@ -1196,6 +1196,7 @@ struct ContentView: View {
     @StateObject private var store = AppStore()
     @StateObject private var library = Library()
     @StateObject private var downloads = DownloadManager()
+    @StateObject private var floating = FloatingSession()
 
     var body: some View {
         Group {
@@ -1219,6 +1220,7 @@ struct ContentView: View {
             } else if store.home == nil {
                 SplashView()
             } else {
+                ZStack {
                 TabView {
                     NavigationView { HomeView() }
                         .navigationViewStyle(.stack)
@@ -1240,11 +1242,16 @@ struct ContentView: View {
                         .tabItem { Label("قائمتي", systemImage: "heart.fill") }
                 }
                 .accentColor(Color.brandCyan)
+                if floating.active {
+                    FloatingPlayerHost()
+                }
+                }
             }
         }
         .environmentObject(store)
         .environmentObject(library)
         .environmentObject(downloads)
+        .environmentObject(floating)
         .environment(\.layoutDirection, .rightToLeft)
         .preferredColorScheme(.dark)
         .task { await store.loadHome() }
@@ -2407,6 +2414,7 @@ struct DetailView: View {
     @EnvironmentObject var store: AppStore
     @EnvironmentObject var library: Library
     @EnvironmentObject var downloads: DownloadManager
+    @EnvironmentObject var floating: FloatingSession
     @State private var detail: Detail?
     @State private var season: Int = 0
     @State private var episode: Episode? = nil
@@ -2631,13 +2639,15 @@ struct DetailView: View {
     private func serverButtons(servers: [Server], defaultURL: String?, title: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if let first = servers.first {
-                NavigationLink(destination: PlayerView(title: title, servers: servers,
-                                                       initialURL: defaultURL ?? first.url,
-                                                       card: card,
-                                                       seasonNum: episode != nil ? season : nil,
-                                                       episodeNum: episode?.n,
-                                                       seasonEpisodes: episode != nil ? (detail?.seasons[String(season)] ?? []) : [],
-                                                       seriesName: card.t.isEmpty ? card.l : card.t)) {
+                Button(action: {
+                    floating.start(title: title, servers: servers,
+                                   initialURL: defaultURL ?? first.url,
+                                   card: card,
+                                   seasonNum: episode != nil ? season : nil,
+                                   episodeNum: episode?.n,
+                                   seasonEpisodes: episode != nil ? (detail?.seasons[String(season)] ?? []) : [],
+                                   seriesName: card.t.isEmpty ? card.l : card.t)
+                }) {
                     HStack(spacing: 10) {
                         ZStack {
                             Circle().fill(Color.white)
@@ -2670,6 +2680,7 @@ struct PlayerView: View {
     let episodeNum: Int?
     let seasonEpisodes: [Episode]
     let seriesName: String
+    let onURLChange: ((String) -> Void)?
     @EnvironmentObject var library: Library
     @State private var idx: Int
     @State private var phase = 0
@@ -2680,7 +2691,8 @@ struct PlayerView: View {
 
     init(title: String, servers: [Server], initialURL: String,
          card: Card? = nil, seasonNum: Int? = nil, episodeNum: Int? = nil,
-         seasonEpisodes: [Episode] = [], seriesName: String = "") {
+         seasonEpisodes: [Episode] = [], seriesName: String = "",
+         onURLChange: ((String) -> Void)? = nil) {
         self.title = title
         self.servers = servers
         self.card = card
@@ -2688,6 +2700,7 @@ struct PlayerView: View {
         self.episodeNum = episodeNum
         self.seasonEpisodes = seasonEpisodes
         self.seriesName = seriesName
+        self.onURLChange = onURLChange
         var start = 0
         for i in servers.indices {
             if cleanURL(servers[i].url) == cleanURL(initialURL) {
@@ -2855,6 +2868,138 @@ struct PlayerView: View {
         .background(AmbienceBackground())
         .navigationTitle(curTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { onURLChange?(currentURL) }
+        .onChange(of: idx) { _ in onURLChange?(currentURL) }
+        .onChange(of: epPos) { _ in onURLChange?(currentURL) }
+    }
+}
+
+// MARK: - Floating player
+
+final class FloatingSession: ObservableObject {
+    @Published var active = false
+    @Published var minimized = false
+    var title: String = ""
+    var servers: [Server] = []
+    var initialURL: String = ""
+    var currentURL: String = ""
+    var card: Card? = nil
+    var seasonNum: Int? = nil
+    var episodeNum: Int? = nil
+    var seasonEpisodes: [Episode] = []
+    var seriesName: String = ""
+
+    func start(title: String, servers: [Server], initialURL: String, card: Card?,
+               seasonNum: Int?, episodeNum: Int?, seasonEpisodes: [Episode], seriesName: String) {
+        self.title = title
+        self.servers = servers
+        self.initialURL = initialURL
+        self.currentURL = initialURL
+        self.card = card
+        self.seasonNum = seasonNum
+        self.episodeNum = episodeNum
+        self.seasonEpisodes = seasonEpisodes
+        self.seriesName = seriesName
+        minimized = false
+        active = true
+    }
+
+    func end() {
+        active = false
+        minimized = false
+    }
+}
+
+struct FloatingPlayerHost: View {
+    @EnvironmentObject var session: FloatingSession
+
+    private var startURL: String {
+        session.currentURL.isEmpty ? session.initialURL : session.currentURL
+    }
+
+    var body: some View {
+        if session.minimized {
+            miniView
+        } else {
+            fullView
+        }
+    }
+
+    private var fullView: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(session.title)
+                    .font(.system(size: 13.5, weight: .bold)).foregroundColor(.white)
+                    .lineLimit(1)
+                Spacer()
+                Button(action: { session.minimized = true }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.down").font(.system(size: 11, weight: .black))
+                        Text("تصغير").font(.system(size: 12, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12)).cornerRadius(10)
+                }
+                .buttonStyle(PressScaleStyle())
+                Button(action: { session.end() }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "xmark").font(.system(size: 11, weight: .black))
+                        Text("إغلاق").font(.system(size: 12, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(Color.red.opacity(0.35)).cornerRadius(10)
+                }
+                .buttonStyle(PressScaleStyle())
+            }
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background(Color.black)
+            PlayerView(title: session.title, servers: session.servers,
+                       initialURL: startURL,
+                       card: session.card,
+                       seasonNum: session.seasonNum,
+                       episodeNum: session.episodeNum,
+                       seasonEpisodes: session.seasonEpisodes,
+                       seriesName: session.seriesName,
+                       onURLChange: { url in session.currentURL = url })
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+        .ignoresSafeArea()
+    }
+
+    private var miniView: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                ZStack(alignment: .topTrailing) {
+                    PlayerWebView(url: cleanURL(session.currentURL), onSuccess: {}, onFailure: {})
+                        .frame(width: 188, height: 106)
+                        .cornerRadius(12)
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.25), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.6), radius: 12, y: 5)
+                    HStack(spacing: 6) {
+                        Button(action: { session.minimized = false }) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .black)).foregroundColor(.white)
+                                .padding(7)
+                                .background(Color.black.opacity(0.6)).clipShape(Circle())
+                        }
+                        Button(action: { session.end() }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .black)).foregroundColor(.white)
+                                .padding(7)
+                                .background(Color.black.opacity(0.6)).clipShape(Circle())
+                        }
+                    }
+                    .padding(6)
+                }
+            }
+            .padding(.trailing, 12)
+            .padding(.bottom, 58)
+        }
     }
 }
 
