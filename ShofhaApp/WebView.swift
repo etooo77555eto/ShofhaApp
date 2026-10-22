@@ -2165,7 +2165,7 @@ struct DetailView: View {
                 if let ep = episode {
                     serverButtons(servers: ep.servers, defaultURL: ep.defaultURL,
                                   title: "\(card.t.isEmpty ? card.l : card.t) — الموسم \(season) حلقة \(ep.n)")
-                    downloadSection(servers: ep.servers)
+                    // downloadSection disabled for bisect
                 } else {
                     Text("اختر حلقة لعرض سيرفراتها")
                         .font(.system(size: 13)).foregroundColor(.gray)
@@ -2185,7 +2185,7 @@ struct DetailView: View {
             .buttonStyle(PressScaleStyle())
             serverButtons(servers: det.servers, defaultURL: det.defaultURL,
                           title: card.t.isEmpty ? card.l : card.t)
-            downloadSection(servers: det.servers)
+            // downloadSection disabled for bisect
         } else {
             Text("لا توجد سيرفرات متاحة لهذا العنوان حالياً")
                 .font(.system(size: 13)).foregroundColor(.gray)
