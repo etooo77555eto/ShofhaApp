@@ -382,6 +382,35 @@ final class Library: ObservableObject {
     }
 }
 
+func recommendations(library: Library, pool: [Card]) -> [Card] {
+    var genreScore: [String: Int] = [:]
+    var excluded = Set<Int>()
+    for f in library.favorites {
+        excluded.insert(f.i)
+        for g in f.g { genreScore[g, default: 0] += 3 }
+    }
+    for p in library.progress {
+        excluded.insert(p.card.i)
+        for g in p.card.g { genreScore[g, default: 0] += 2 }
+    }
+    for k in library.watched {
+        if k.hasPrefix("t:"), let id = Int(k.dropFirst(2)) {
+            excluded.insert(id)
+        }
+    }
+    var scored: [(Card, Double)] = []
+    for c in pool {
+        if excluded.contains(c.i) { continue }
+        var s = (c.r ?? 0) * 0.6
+        for g in c.g { s += Double(genreScore[g] ?? 0) }
+        scored.append((c, s))
+    }
+    scored.sort { $0.1 > $1.1 }
+    var out: [Card] = []
+    for item in scored.prefix(20) { out.append(item.0) }
+    return out
+}
+
 // MARK: - Offline downloads
 
 let safariUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -817,7 +846,8 @@ enum ImageLoader {
         else if s.hasPrefix("http://") { s = String(s.dropFirst(7)) }
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/")
         guard let enc = s.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
-        return URL(string: "https://images.weserv.nl/?url=\(enc)&w=400&output=jpg")
+        let w = UserDefaults.standard.bool(forKey: "settings.weakNet") ? 200 : 400
+        return URL(string: "https://images.weserv.nl/?url=\(enc)&w=\(w)&output=jpg")
     }
 
     private static var session: URLSession = {
@@ -890,11 +920,12 @@ enum ImageLoader {
         guard let src = CGImageSourceCreateWithData(data as CFData, opts as CFDictionary) else {
             return UIImage(data: data)
         }
+        let weak = UserDefaults.standard.bool(forKey: "settings.weakNet")
         let thumbOpts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 540
+            kCGImageSourceThumbnailMaxPixelSize: weak ? 220 : 540
         ]
         if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) {
             return UIImage(cgImage: cg)
@@ -1131,13 +1162,16 @@ struct SplashView: View {
 }
 
 struct AmbienceBackground: View {
+    @AppStorage("settings.weakNet") private var weakNet = false
     var body: some View {
         ZStack {
             Color.brandBg
-            RadialGradient(colors: [Color.brandViolet.opacity(0.22), .clear],
-                           center: .topTrailing, startRadius: 30, endRadius: 460)
-            RadialGradient(colors: [Color.brandCyan.opacity(0.08), .clear],
-                           center: .topLeading, startRadius: 30, endRadius: 380)
+            if !weakNet {
+                RadialGradient(colors: [Color.brandViolet.opacity(0.22), .clear],
+                               center: .topTrailing, startRadius: 30, endRadius: 460)
+                RadialGradient(colors: [Color.brandCyan.opacity(0.08), .clear],
+                               center: .topLeading, startRadius: 30, endRadius: 380)
+            }
         }
         .ignoresSafeArea()
     }
@@ -1273,6 +1307,10 @@ struct HomeView: View {
                         CardRowView(title: "🆕 نزل من آخر زيارة", cards: freshCards(home))
                     }
 
+                    if !recommendations(library: library, pool: recPool(home)).isEmpty {
+                        CardRowView(title: "✨ مختارات لك", cards: recommendations(library: library, pool: recPool(home)))
+                    }
+
                     CardRowView(title: "🔥 ترند شوفها اليوم", cards: home.trend)
 
                     if !home.cols.isEmpty {
@@ -1368,6 +1406,18 @@ struct HomeView: View {
         }
     }
 
+    private func recPool(_ home: HomeData) -> [Card] {
+        if !store.allCards.isEmpty { return store.allCards }
+        var out: [Card] = []
+        out.append(contentsOf: home.hero)
+        out.append(contentsOf: home.trend)
+        out.append(contentsOf: home.films)
+        out.append(contentsOf: home.series)
+        out.append(contentsOf: home.anime)
+        out.append(contentsOf: home.turk)
+        return out
+    }
+
     private func freshCards(_ home: HomeData) -> [Card] {
         var seen = Set<Int>()
         var out: [Card] = []
@@ -1393,6 +1443,7 @@ struct HomeView: View {
 
 struct HeroPager: View {
     let cards: [Card]
+    @AppStorage("settings.weakNet") private var weakNet = false
     @State private var page = 0
 
     var body: some View {
@@ -1421,6 +1472,7 @@ struct HeroPager: View {
             .padding(.bottom, 10)
         }
         .onReceive(Timer.publish(every: 5.5, on: .main, in: .common).autoconnect()) { _ in
+            guard !weakNet else { return }
             guard !top.isEmpty else { return }
             withAnimation(.easeInOut(duration: 0.55)) {
                 page = (page + 1) % top.count
@@ -1832,6 +1884,7 @@ struct SearchView: View {
 struct FavoritesView: View {
     @EnvironmentObject var library: Library
     @EnvironmentObject var downloads: DownloadManager
+    @AppStorage("settings.weakNet") private var weakNet = false
 
     private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
 
@@ -1857,6 +1910,23 @@ struct FavoritesView: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, 16)
                 .padding(.top, 14)
+                HStack(spacing: 11) {
+                    Image(systemName: "tortoise.fill")
+                        .font(.system(size: 18)).foregroundColor(Color.brandGold)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("وضع النت الضعيف").font(.system(size: 15, weight: .black)).foregroundColor(.white)
+                        Text("بوسترات أخف وحركة أقل — يوفّر بياناتك")
+                            .font(.system(size: 11.5)).foregroundColor(.gray)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $weakNet)
+                        .labelsHidden()
+                        .tint(Color.brandCyan)
+                }
+                .padding(14)
+                .background(Color.white.opacity(0.05)).cornerRadius(14)
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                .padding(.horizontal, 16)
             if library.favorites.isEmpty {
                 VStack(spacing: 12) {
                     Text("🤍").font(.system(size: 42))
