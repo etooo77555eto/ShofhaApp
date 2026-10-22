@@ -1196,7 +1196,6 @@ struct ContentView: View {
     @StateObject private var store = AppStore()
     @StateObject private var library = Library()
     @StateObject private var downloads = DownloadManager()
-    @StateObject private var floating = FloatingSession()
 
     var body: some View {
         Group {
@@ -1220,7 +1219,6 @@ struct ContentView: View {
             } else if store.home == nil {
                 SplashView()
             } else {
-                ZStack {
                 TabView {
                     NavigationView { HomeView() }
                         .navigationViewStyle(.stack)
@@ -1242,16 +1240,11 @@ struct ContentView: View {
                         .tabItem { Label("قائمتي", systemImage: "heart.fill") }
                 }
                 .accentColor(Color.brandCyan)
-                if floating.active {
-                    FloatingPlayerHost()
-                }
-                }
             }
         }
         .environmentObject(store)
         .environmentObject(library)
         .environmentObject(downloads)
-        .environmentObject(floating)
         .environment(\.layoutDirection, .rightToLeft)
         .preferredColorScheme(.dark)
         .task { await store.loadHome() }
@@ -2247,160 +2240,27 @@ final class LocalPlayerModel: ObservableObject {
 struct LocalPlayerView: View {
     let item: DownloadItem
     @EnvironmentObject var downloads: DownloadManager
-    @StateObject private var model = LocalPlayerModel()
-    @State private var rate: Float = 1.0
-    @State private var locked = false
-    @State private var showPicker = false
-    @State private var hasSubs = false
-
-    private let rates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+    @State private var player: AVPlayer?
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VStack(spacing: 0) {
-                ZStack(alignment: .bottom) {
-                    VideoPlayer(player: model.player)
-                    if !model.cueText.isEmpty {
-                        Text(model.cueText)
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(.white)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(Color.black.opacity(0.65))
-                            .cornerRadius(8)
-                            .padding(.horizontal, 20)
-                            .padding(.bottom, 26)
-                    }
-                }
-                if !locked {
-                    controls
-                }
-                Spacer(minLength: 0)
-            }
-            if locked {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Button(action: { locked = false }) {
-                            Image(systemName: "lock.open.fill")
-                                .font(.system(size: 16))
-                                .foregroundColor(.white)
-                                .padding(11)
-                                .background(Color.black.opacity(0.55))
-                                .clipShape(Circle())
-                        }
-                        .padding(14)
-                    }
-                    Spacer()
-                }
+            if let player = player {
+                VideoPlayer(player: player)
+            } else {
+                ProgressView().progressViewStyle(CircularProgressViewStyle(tint: .white))
             }
         }
         .navigationTitle(item.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            model.load(url: downloads.localURL(item), key: item.key)
-            loadSubtitlesIfPresent()
+            if player == nil {
+                player = AVPlayer(url: downloads.localURL(item))
+            }
+            player?.play()
         }
         .onDisappear {
-            model.stop()
-        }
-        .fileImporter(isPresented: $showPicker, allowedContentTypes: [UTType.data]) { result in
-            if case .success(let url) = result {
-                importSubtitles(from: url)
-            }
-        }
-    }
-
-    private var controls: some View {
-        VStack(spacing: 13) {
-            HStack(spacing: 26) {
-                Button(action: { model.seek(by: -10) }) {
-                    Image(systemName: "gobackward.10").font(.system(size: 24))
-                }
-                Button(action: { model.togglePlay() }) {
-                    Image(systemName: model.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 44)).foregroundColor(Color.brandCyan)
-                }
-                Button(action: { model.seek(by: 10) }) {
-                    Image(systemName: "goforward.10").font(.system(size: 24))
-                }
-            }
-            .foregroundColor(.white)
-            HStack(spacing: 7) {
-                ForEach(rates, id: \.self) { r in
-                    Button(action: { rate = r; model.setRate(r) }) {
-                        Text(rateLabel(r))
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 11).padding(.vertical, 6)
-                            .background(rate == r ? AnyShapeStyle(Color.brandGradient) : AnyShapeStyle(Color.white.opacity(0.08)))
-                            .cornerRadius(13)
-                    }
-                    .buttonStyle(PressScaleStyle())
-                }
-            }
-            HStack(spacing: 10) {
-                Button(action: { showPicker = true }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "captions.bubble.fill")
-                        Text(hasSubs ? "تغيير ملف الترجمة" : "أضف ترجمة srt")
-                            .font(.system(size: 12.5, weight: .bold))
-                    }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 13).padding(.vertical, 8)
-                    .background(Color.white.opacity(0.08)).cornerRadius(11)
-                }
-                .buttonStyle(PressScaleStyle())
-                if hasSubs {
-                    Button(action: {
-                        model.showSubs.toggle()
-                        if !model.showSubs { model.cueText = "" }
-                    }) {
-                        Text(model.showSubs ? "إخفاء الترجمة" : "إظهار الترجمة")
-                            .font(.system(size: 12.5, weight: .bold)).foregroundColor(Color.brandCyan)
-                            .padding(.horizontal, 13).padding(.vertical, 8)
-                            .background(Color.brandCyan.opacity(0.12)).cornerRadius(11)
-                    }
-                    .buttonStyle(PressScaleStyle())
-                }
-                Spacer()
-                Button(action: { locked = true }) {
-                    Image(systemName: "lock.fill")
-                        .foregroundColor(.white)
-                        .padding(9)
-                        .background(Color.white.opacity(0.08))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(PressScaleStyle())
-            }
-        }
-        .padding(16)
-        .background(Color.brandBg)
-    }
-
-    private func rateLabel(_ r: Float) -> String {
-        if r == 1.0 { return "1×" }
-        return String(format: "%g×", Double(r))
-    }
-
-    private func loadSubtitlesIfPresent() {
-        let url = subtitleFileURL(for: item)
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        guard let data = try? Data(contentsOf: url), let text = decodeSubtitleData(data) else { return }
-        model.cues = parseSRT(text)
-        hasSubs = !model.cues.isEmpty
-    }
-
-    private func importSubtitles(from url: URL) {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else { return }
-        try? data.write(to: subtitleFileURL(for: item))
-        if let text = decodeSubtitleData(data) {
-            model.cues = parseSRT(text)
-            hasSubs = !model.cues.isEmpty
-            model.showSubs = true
+            player?.pause()
         }
     }
 }
@@ -2414,7 +2274,6 @@ struct DetailView: View {
     @EnvironmentObject var store: AppStore
     @EnvironmentObject var library: Library
     @EnvironmentObject var downloads: DownloadManager
-    @EnvironmentObject var floating: FloatingSession
     @State private var detail: Detail?
     @State private var season: Int = 0
     @State private var episode: Episode? = nil
@@ -2639,15 +2498,13 @@ struct DetailView: View {
     private func serverButtons(servers: [Server], defaultURL: String?, title: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if let first = servers.first {
-                Button(action: {
-                    floating.start(title: title, servers: servers,
-                                   initialURL: defaultURL ?? first.url,
-                                   card: card,
-                                   seasonNum: episode != nil ? season : nil,
-                                   episodeNum: episode?.n,
-                                   seasonEpisodes: episode != nil ? (detail?.seasons[String(season)] ?? []) : [],
-                                   seriesName: card.t.isEmpty ? card.l : card.t)
-                }) {
+                NavigationLink(destination: PlayerView(title: title, servers: servers,
+                                                       initialURL: defaultURL ?? first.url,
+                                                       card: card,
+                                                       seasonNum: episode != nil ? season : nil,
+                                                       episodeNum: episode?.n,
+                                                       seasonEpisodes: episode != nil ? (detail?.seasons[String(season)] ?? []) : [],
+                                                       seriesName: card.t.isEmpty ? card.l : card.t)) {
                     HStack(spacing: 10) {
                         ZStack {
                             Circle().fill(Color.white)
@@ -2680,7 +2537,6 @@ struct PlayerView: View {
     let episodeNum: Int?
     let seasonEpisodes: [Episode]
     let seriesName: String
-    let onURLChange: ((String) -> Void)?
     @EnvironmentObject var library: Library
     @State private var idx: Int
     @State private var phase = 0
@@ -2691,8 +2547,7 @@ struct PlayerView: View {
 
     init(title: String, servers: [Server], initialURL: String,
          card: Card? = nil, seasonNum: Int? = nil, episodeNum: Int? = nil,
-         seasonEpisodes: [Episode] = [], seriesName: String = "",
-         onURLChange: ((String) -> Void)? = nil) {
+         seasonEpisodes: [Episode] = [], seriesName: String = "") {
         self.title = title
         self.servers = servers
         self.card = card
@@ -2700,7 +2555,6 @@ struct PlayerView: View {
         self.episodeNum = episodeNum
         self.seasonEpisodes = seasonEpisodes
         self.seriesName = seriesName
-        self.onURLChange = onURLChange
         var start = 0
         for i in servers.indices {
             if cleanURL(servers[i].url) == cleanURL(initialURL) {
@@ -2868,138 +2722,6 @@ struct PlayerView: View {
         .background(AmbienceBackground())
         .navigationTitle(curTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { onURLChange?(currentURL) }
-        .onChange(of: idx) { _ in onURLChange?(currentURL) }
-        .onChange(of: epPos) { _ in onURLChange?(currentURL) }
-    }
-}
-
-// MARK: - Floating player
-
-final class FloatingSession: ObservableObject {
-    @Published var active = false
-    @Published var minimized = false
-    var title: String = ""
-    var servers: [Server] = []
-    var initialURL: String = ""
-    var currentURL: String = ""
-    var card: Card? = nil
-    var seasonNum: Int? = nil
-    var episodeNum: Int? = nil
-    var seasonEpisodes: [Episode] = []
-    var seriesName: String = ""
-
-    func start(title: String, servers: [Server], initialURL: String, card: Card?,
-               seasonNum: Int?, episodeNum: Int?, seasonEpisodes: [Episode], seriesName: String) {
-        self.title = title
-        self.servers = servers
-        self.initialURL = initialURL
-        self.currentURL = initialURL
-        self.card = card
-        self.seasonNum = seasonNum
-        self.episodeNum = episodeNum
-        self.seasonEpisodes = seasonEpisodes
-        self.seriesName = seriesName
-        minimized = false
-        active = true
-    }
-
-    func end() {
-        active = false
-        minimized = false
-    }
-}
-
-struct FloatingPlayerHost: View {
-    @EnvironmentObject var session: FloatingSession
-
-    private var startURL: String {
-        session.currentURL.isEmpty ? session.initialURL : session.currentURL
-    }
-
-    var body: some View {
-        if session.minimized {
-            miniView
-        } else {
-            fullView
-        }
-    }
-
-    private var fullView: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text(session.title)
-                    .font(.system(size: 13.5, weight: .bold)).foregroundColor(.white)
-                    .lineLimit(1)
-                Spacer()
-                Button(action: { session.minimized = true }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "chevron.down").font(.system(size: 11, weight: .black))
-                        Text("تصغير").font(.system(size: 12, weight: .bold))
-                    }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .background(Color.white.opacity(0.12)).cornerRadius(10)
-                }
-                .buttonStyle(PressScaleStyle())
-                Button(action: { session.end() }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "xmark").font(.system(size: 11, weight: .black))
-                        Text("إغلاق").font(.system(size: 12, weight: .bold))
-                    }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .background(Color.red.opacity(0.35)).cornerRadius(10)
-                }
-                .buttonStyle(PressScaleStyle())
-            }
-            .padding(.horizontal, 14).padding(.vertical, 9)
-            .background(Color.black)
-            PlayerView(title: session.title, servers: session.servers,
-                       initialURL: startURL,
-                       card: session.card,
-                       seasonNum: session.seasonNum,
-                       episodeNum: session.episodeNum,
-                       seasonEpisodes: session.seasonEpisodes,
-                       seriesName: session.seriesName,
-                       onURLChange: { url in session.currentURL = url })
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
-        .ignoresSafeArea()
-    }
-
-    private var miniView: some View {
-        VStack {
-            Spacer()
-            HStack {
-                Spacer()
-                ZStack(alignment: .topTrailing) {
-                    PlayerWebView(url: cleanURL(session.currentURL), onSuccess: {}, onFailure: {})
-                        .frame(width: 188, height: 106)
-                        .cornerRadius(12)
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.25), lineWidth: 1))
-                        .shadow(color: .black.opacity(0.6), radius: 12, y: 5)
-                    HStack(spacing: 6) {
-                        Button(action: { session.minimized = false }) {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 11, weight: .black)).foregroundColor(.white)
-                                .padding(7)
-                                .background(Color.black.opacity(0.6)).clipShape(Circle())
-                        }
-                        Button(action: { session.end() }) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 11, weight: .black)).foregroundColor(.white)
-                                .padding(7)
-                                .background(Color.black.opacity(0.6)).clipShape(Circle())
-                        }
-                    }
-                    .padding(6)
-                }
-            }
-            .padding(.trailing, 12)
-            .padding(.bottom, 58)
-        }
     }
 }
 
